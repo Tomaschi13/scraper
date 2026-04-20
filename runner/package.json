@@ -1,0 +1,17 @@
+{
+  "name": "scraper-runner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Playwright-based runner that launches Chromium with the Scraper extension and starts robots through the existing extension message flow.",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright": "^1.59.0"
+  }
+}

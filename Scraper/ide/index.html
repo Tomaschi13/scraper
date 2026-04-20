@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scraper Studio</title>
+    <link rel="stylesheet" href="./index.css" />
+  </head>
+  <body>
+    <div class="container-fluid">
+      <div class="ide-shell">
+        <div class="tabpanel workspace-stage" role="tabpanel">
+          <div class="workspace-tabbar">
+            <ul class="nav nav-tabs" role="tablist">
+              <li class="active" role="presentation">
+                <a aria-controls="code" data-tab-target="code" href="#code" role="tab">Script</a>
+              </li>
+              <li role="presentation">
+                <a aria-controls="logtab" data-tab-target="logtab" href="#logtab" role="tab">Log</a>
+              </li>
+              <li role="presentation">
+                <a aria-controls="output" data-tab-target="output" href="#output" role="tab">Output</a>
+              </li>
+              <li role="presentation">
+                <a aria-controls="seltab" data-tab-target="seltab" href="#seltab" role="tab">Selectors</a>
+              </li>
+              <li role="presentation">
+                <a aria-controls="resume" data-tab-target="resume" href="#resume" role="tab">Resume</a>
+              </li>
+              <li role="presentation">
+                <a aria-controls="config" data-tab-target="config" href="#config" role="tab">Config</a>
+              </li>
+            </ul>
+          </div>
+
+          <div class="tab-content">
+            <div class="tab-pane active" id="code" role="tabpanel">
+              <section class="panel-surface workspace-panel">
+                <div class="panel-heading">
+                  <div>
+                    <p class="panel-kicker">Script workspace</p>
+                    <h2>Compose and launch a run</h2>
+                  </div>
+                  <p class="panel-caption">
+                    Choose a robot, point it at a page, and work directly inside the editor.
+                  </p>
+                </div>
+
+                <form id="mainfrm">
+                  <div class="row row-space toolbar-row">
+                    <div class="field field-robot">
+                      <input
+                        autocomplete="off"
+                        class="form-control combobox-input"
+                        id="robotNameInput"
+                        placeholder="Select or type a robot name"
+                        type="text"
+                      />
+                      <ul id="robotDropdown" role="listbox"></ul>
+                      <select aria-hidden="true" id="robotSelect" tabindex="-1"></select>
+                    </div>
+                    <div class="field field-url">
+                      <input
+                        class="form-control"
+                        id="url1"
+                        placeholder="https://example.com"
+                        type="text"
+                      />
+                    </div>
+                    <div class="field field-tag">
+                      <input
+                        class="form-control"
+                        id="tag1"
+                        placeholder="TAG (optional)"
+                        type="text"
+                      />
+                    </div>
+                  </div>
+
+                  <div class="row row-space control-row">
+                    <div class="buttonset" id="buttonset">
+                      <button class="btn btn-primary" id="btnRun" type="button">Run</button>
+                      <button class="btn btn-primary" id="btnStop" type="button">Stop</button>
+                      <button class="btn btn-primary" id="btnSave" type="button">Save</button>
+                      <button class="btn btn-default" id="btnFind" type="button">Find</button>
+                      <button class="btn btn-default" id="btnRefreshRobots" type="button">Refresh robots</button>
+                    </div>
+                    <div class="status-wrap">
+                      <div class="status-stack">
+                        <small id="status">Idle</small>
+                        <small id="portalRefreshStatus" aria-live="polite"></small>
+                      </div>
+                    </div>
+                  </div>
+                </form>
+
+                <div class="editor-panel">
+                  <div class="editor-search" id="editorSearch" hidden>
+                    <div class="editor-search-row">
+                      <label class="visually-hidden" for="editorSearchInput">Find in code</label>
+                      <input
+                        autocomplete="off"
+                        class="form-control input-sm editor-search-input"
+                        id="editorSearchInput"
+                        placeholder="Find"
+                        type="text"
+                      />
+                      <button
+                        aria-label="Match case"
+                        aria-pressed="false"
+                        class="btn btn-default btn-sm editor-search-toggle"
+                        id="editorSearchCase"
+                        title="Match case"
+                        type="button"
+                      >
+                        Aa
+                      </button>
+                      <button
+                        aria-label="Match whole word"
+                        aria-pressed="false"
+                        class="btn btn-default btn-sm editor-search-toggle"
+                        id="editorSearchWord"
+                        title="Match whole word"
+                        type="button"
+                      >
+                        ab
+                      </button>
+                      <button
+                        aria-label="Use regular expression"
+                        aria-pressed="false"
+                        class="btn btn-default btn-sm editor-search-toggle"
+                        id="editorSearchRegex"
+                        title="Use regular expression"
+                        type="button"
+                      >
+                        .*
+                      </button>
+                      <span class="editor-search-status" id="editorSearchStatus" aria-live="polite"></span>
+                      <button
+                        aria-label="Previous match"
+                        class="btn btn-default btn-sm"
+                        id="editorSearchPrev"
+                        title="Previous match"
+                        type="button"
+                      >
+                        &#8593;
+                      </button>
+                      <button
+                        aria-label="Next match"
+                        class="btn btn-default btn-sm"
+                        id="editorSearchNext"
+                        title="Next match"
+                        type="button"
+                      >
+                        &#8595;
+                      </button>
+                      <button
+                        aria-label="Close search"
+                        class="btn btn-default btn-sm"
+                        id="editorSearchClose"
+                        title="Close search"
+                        type="button"
+                      >
+                        &times;
+                      </button>
+                    </div>
+                  </div>
+                  <div id="code1"></div>
+                  <textarea id="codeInput"></textarea>
+                </div>
+              </section>
+            </div>
+
+            <div class="tab-pane" id="logtab" role="tabpanel">
+              <section class="panel-surface panel-surface-fill">
+                <div class="row row-space">
+                  <div class="full-width">
+                    <pre id="log">No logs yet.</pre>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <div class="tab-pane" id="output" role="tabpanel">
+              <section class="panel-surface panel-surface-fill">
+                <div class="row row-space">
+                  <div class="full-width">
+                    <div class="output-toolbar">
+                      <a href="#" id="fulldata">Open current run tab</a>
+                      <div class="output-actions">
+                        <label class="visually-hidden" for="tableSelect">Table</label>
+                        <select class="form-control input-sm" id="tableSelect"></select>
+                        <button class="btn btn-default btn-sm" id="downloadJsonButton" type="button">JSON</button>
+                        <button class="btn btn-default btn-sm" id="downloadCsvButton" type="button">CSV</button>
+                      </div>
+                    </div>
+                    <div class="handsontable-wrap" id="contentTable">
+                      <table id="outputTable">
+                        <thead></thead>
+                        <tbody></tbody>
+                      </table>
+                    </div>
+                    <p></p>
+                    <pre id="content">No emitted rows yet.</pre>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <div class="tab-pane" id="seltab" role="tabpanel">
+              <section class="panel-surface panel-surface-fill">
+                <div class="selector-layout">
+                  <div class="selector-top">
+                    <p class="selector-help">
+                      <button class="btn btn-primary btn-sm" id="copySelCode" type="button">Copy code</button>
+                      For multiple rows: use 1st element's name <code>row</code> and selector for rows in your data.
+                    </p>
+                    <div class="handsontable-wrap selector-input-wrap" id="seltable">
+                      <table id="selectorTable">
+                        <thead>
+                          <tr>
+                            <th>Name</th>
+                            <th>Selector</th>
+                          </tr>
+                        </thead>
+                        <tbody id="selectorTableBody"></tbody>
+                      </table>
+                    </div>
+                    <textarea id="selectorsCode" readonly></textarea>
+                  </div>
+                  <div class="selector-bottom">
+                    <div class="handsontable-wrap" id="datatable">
+                      <table id="selectorPreviewTable">
+                        <thead></thead>
+                        <tbody></tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+
+            <div class="tab-pane" id="resume" role="tabpanel">
+              <section class="panel-surface panel-surface-fill">
+                <form class="form-horizontal">
+                  <fieldset>
+                    <div class="form-group">
+                      <label class="control-label" for="resumeRunId">RunID</label>
+                      <div class="resume-input">
+                        <input class="form-control input-md" id="resumeRunId" type="text" />
+                      </div>
+                    </div>
+                  </fieldset>
+                </form>
+
+                <p>
+                  <button class="btn btn-primary" id="checkResumeRun" type="button">Check</button>
+                  <label id="checkResumeRunLabel"></label>
+                  <button class="btn btn-primary" id="resumeRun" type="button">Resume</button>
+                  <label id="resumeRunLabel"></label>
+                </p>
+
+                <p>
+                  <pre id="resumePreview">Preview of run will be here</pre>
+                </p>
+              </section>
+            </div>
+
+            <div class="tab-pane" id="config" role="tabpanel">
+              <section class="panel-surface panel-surface-fill">
+                <p></p>
+                <p class="config-actions">
+                  <button class="btn btn-primary" id="resetProxy" type="button">Reset proxy settings</button>
+                  <button class="btn btn-primary" id="allowImages" type="button">Allow images</button>
+                  <button class="btn btn-primary" id="blockImages" type="button">Block images</button>
+                </p>
+              </section>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="../vendor/ace/ace.js"></script>
+    <script src="../vendor/ace/theme-twilight.js"></script>
+    <script src="../vendor/ace/mode-javascript.js"></script>
+    <script src="./search-helpers.js"></script>
+    <script src="./ui-transport-helpers.js"></script>
+    <script src="./index.js"></script>
+  </body>
+</html>

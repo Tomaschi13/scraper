@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Scraper Studio — Sign In</title>
+    <link rel="stylesheet" href="login.css" />
+  </head>
+  <body>
+    <div class="login-shell">
+      <div class="login-card">
+        <div class="login-badge">Studio</div>
+        <div class="login-brand-block">
+          <p class="login-kicker">Studio access</p>
+          <h1 class="login-title">Sign In</h1>
+          <p class="login-subtitle">Sign in to continue.</p>
+        </div>
+
+        <div id="errorMsg" class="error-msg" hidden></div>
+        <div id="successMsg" class="success-msg" hidden></div>
+
+        <form id="loginForm" novalidate>
+          <div class="form-group">
+            <label for="email">Email</label>
+            <input
+              type="email"
+              id="email"
+              name="email"
+              autocomplete="email"
+              autofocus
+              required
+              placeholder="you@example.com"
+            />
+          </div>
+          <div class="form-group">
+            <label for="password">Password</label>
+            <input
+              type="password"
+              id="password"
+              name="password"
+              autocomplete="current-password"
+              required
+              placeholder="••••••••"
+            />
+          </div>
+          <button type="submit" id="submitBtn" class="btn-login">Sign In</button>
+        </form>
+
+        <p class="login-hint">
+          Accounts are managed by your administrator.<br />
+          Make sure the portal is running at
+          <a href="#" id="portalOriginLink" target="_blank" rel="noreferrer"></a>.
+        </p>
+      </div>
+    </div>
+
+    <script type="module" src="login.js"></script>
+  </body>
+</html>

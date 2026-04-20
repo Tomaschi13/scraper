@@ -1,0 +1,53 @@
+{
+  "manifest_version": 3,
+  "name": "Scraper Studio",
+  "version": "0.1.0",
+  "minimum_chrome_version": "135",
+  "description": "Local Chrome extension IDE for running and monitoring scraper jobs.",
+  "permissions": [
+    "activeTab",
+    "browsingData",
+    "contentSettings",
+    "cookies",
+    "debugger",
+    "downloads",
+    "proxy",
+    "storage",
+    "tabs",
+    "userScripts"
+  ],
+  "host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Scraper Studio"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["login/login.html", "login/login.js", "login/login.css"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "vendor/jquery-3.6.0.min.js",
+        "vendor/underscore.js",
+        "vendor/moment-with-locales.min.js",
+        "vendor/xlsx.core.min.js",
+        "content/legacy-content.js",
+        "content/runtime.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
