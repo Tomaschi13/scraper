@@ -118,6 +118,15 @@ test("loading content.js auto-invokes domReady and emits a single domReady messa
   assert.ok(domReady, "expected an initial domReady message");
 });
 
+test("wait with a numeric delay resolves like a sleep helper", async () => {
+  const harness = setupLegacyRuntime();
+  const startedAt = Date.now();
+
+  await harness.invoke("wait", 25);
+
+  assert.ok(Date.now() - startedAt >= 20, "expected wait(number) to pause before resolving");
+});
+
 test("emit stamps source_url from document.URL and sends a single emit message", () => {
   const harness = setupLegacyRuntime({ url: "https://example.com/list" });
   harness.resetMessages();

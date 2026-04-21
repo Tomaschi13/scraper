@@ -14,6 +14,7 @@ import "./run-lifecycle-helpers.js";
 import "./runtime-bridge-helpers.js";
 import "./content-message-router.js";
 import "./auth-prompt-helpers.js";
+import "./robot-record-helpers.js";
 import "./user-script-helpers.js";
 
 const {
@@ -43,6 +44,11 @@ const {
   hasPortalData,
   shouldPromptForAuth
 } = globalThis.ScraperAuthPromptHelpers;
+
+const {
+  applyPortalRobotUpdate,
+  normalizeRobotFromPortal
+} = globalThis.ScraperRobotRecordHelpers;
 
 const {
   buildLegacyUserScriptSources,
@@ -281,7 +287,7 @@ async function initialize() {
 
   const hasPortalSession = await syncAuthFromPortalSession({ refreshPortalData: false });
   if (hasPortalSession) {
-    await syncWithPortal();
+    await syncWithPortal({ refreshSelectedRobot: true });
   }
 
   ensureDraftConsistency();
@@ -326,7 +332,7 @@ function ensureUserScriptWorldConfigured() {
   return userScriptWorldReady;
 }
 
-async function syncWithPortal() {
+async function syncWithPortal({ refreshSelectedRobot = false, strictSelectedRobot = false } = {}) {
   const portalRobots = await fetchRobotsFromPortal();
 
   if (portalRobots === null) {
@@ -335,7 +341,19 @@ async function syncWithPortal() {
 
   const wasAuthPromptPending = authPromptPending;
   authPromptPending = false;
-  const changed = await mergePortalRobotsIntoLocal(portalRobots);
+  let changed = await mergePortalRobotsIntoLocal(portalRobots);
+
+  if (draft?.selectedRobotId) {
+    try {
+      const selectedRobotRefresh = await syncRobotFromPortal(draft.selectedRobotId, { syncDraft: refreshSelectedRobot });
+      changed = selectedRobotRefresh.changed || changed;
+    } catch (error) {
+      if (strictSelectedRobot) {
+        throw error;
+      }
+      console.warn("[portal-sync] fetchRobotFromPortal failed:", error.message);
+    }
+  }
 
   if (changed) {
     schedulePersist();
@@ -354,7 +372,7 @@ async function pullRobotsFromPortal() {
   // keep retrying behind an active login tab.
   if (isReauthenticating) return null;
 
-  return syncWithPortal();
+  return syncWithPortal({ refreshSelectedRobot: true, strictSelectedRobot: true });
 }
 
 function clearPortalDataForAuthFailure() {
@@ -523,7 +541,7 @@ async function syncAuthFromPortalSession({
     return true;
   }
 
-  await syncWithPortal();
+  await syncWithPortal({ refreshSelectedRobot: true });
   return true;
 }
 
@@ -538,21 +556,16 @@ async function mergePortalRobotsIntoLocal(portalRobots) {
   }
 
   for (const portalRobot of portalRobots) {
-    const existing = robots.find((robot) => robot.id === portalRobot.id);
-
-    if (!existing) {
-      robots.push(createLocalRobotFromPortal(portalRobot));
-      changed = true;
-      continue;
-    }
-
-    if (!robotDiffersFromPortal(existing, portalRobot)) {
-      continue;
-    }
-
-    Object.assign(existing, createLocalRobotFromPortal(portalRobot));
-    syncDraftWithRobot(existing);
-    changed = true;
+    const update = applyPortalRobotUpdate({
+      robots,
+      draft,
+      portalRobot,
+      defaultConfig: DEFAULT_CONFIG,
+      defaultScript: DEFAULT_SCRIPT,
+      syncDraft: true
+    });
+    draft = update.draft;
+    changed = update.changed || changed;
   }
 
   changed = ensureDraftConsistency() || changed;
@@ -560,47 +573,29 @@ async function mergePortalRobotsIntoLocal(portalRobots) {
   return changed;
 }
 
-function createLocalRobotFromPortal(portalRobot) {
-  const now = new Date().toISOString();
-
-  return {
-    id: portalRobot.id,
-    name: portalRobot.name,
-    url: portalRobot.url || "",
-    tag: portalRobot.tag || "",
-    code: portalRobot.code || DEFAULT_SCRIPT,
-    config: {
-      ...DEFAULT_CONFIG,
-      ...(portalRobot.config || {})
-    },
-    createdAt: portalRobot.createdAt || now,
-    updatedAt: portalRobot.updatedAt || now
-  };
-}
-
-function syncDraftWithRobot(robot) {
-  if (!draft || draft.selectedRobotId !== robot.id) {
-    return;
+async function syncRobotFromPortal(robotId, { syncDraft = true } = {}) {
+  if (!robotId) {
+    return { robot: null, changed: false };
   }
 
-  draft.name = robot.name;
-  draft.url = robot.url;
-  draft.tag = robot.tag;
-  draft.code = robot.code;
-  draft.config = clone(robot.config);
-}
+  const portalRobot = await fetchRobotFromPortal(robotId);
 
-function robotDiffersFromPortal(localRobot, portalRobot) {
-  const portalConfig = {
-    ...DEFAULT_CONFIG,
-    ...(portalRobot.config || {})
-  };
+  if (!portalRobot) {
+    const changed = await purgeRobotState(robotId);
+    return { robot: null, changed };
+  }
 
-  return localRobot.name !== portalRobot.name
-    || localRobot.url !== (portalRobot.url || "")
-    || localRobot.tag !== (portalRobot.tag || "")
-    || localRobot.code !== (portalRobot.code || DEFAULT_SCRIPT)
-    || JSON.stringify(localRobot.config || {}) !== JSON.stringify(portalConfig);
+  const update = applyPortalRobotUpdate({
+    robots,
+    draft,
+    portalRobot,
+    defaultConfig: DEFAULT_CONFIG,
+    defaultScript: DEFAULT_SCRIPT,
+    syncDraft
+  });
+
+  draft = update.draft;
+  return update;
 }
 
 function withReady(task) {
@@ -634,7 +629,7 @@ async function handleMessage(message, sender) {
     case "SAVE_ROBOT":
       return { ok: true, robot: await saveRobot(message.robot || {}) };
     case "LOAD_ROBOT":
-      return { ok: true, robot: loadRobot(message.robotId) };
+      return { ok: true, robot: await loadRobot(message.robotId) };
     case "START_RUN":
       return { ok: true, run: await startRun(message.payload || {}) };
     case "STOP_RUN":
@@ -704,7 +699,7 @@ async function handleAuthComplete(token, user) {
   isReauthenticating = false;
   await closeLoginTabIfOpen();
 
-  await syncWithPortal();
+  await syncWithPortal({ refreshSelectedRobot: true });
   console.log(`[auth] Authenticated as ${user?.email || "unknown"} (${user?.role || "?"})`);
 }
 
@@ -998,7 +993,11 @@ async function saveRobot(robotInput) {
     throw new Error(`Could not save robot to the portal: ${error.message}`);
   }
 
-  Object.assign(existingRobot, createLocalRobotFromPortal(savedRobot || nextRobot));
+  Object.assign(existingRobot, normalizeRobotFromPortal(savedRobot || nextRobot, {
+    defaultConfig: DEFAULT_CONFIG,
+    defaultScript: DEFAULT_SCRIPT,
+    fallbackRobot: existingRobot
+  }));
   draft = createDraftFromRobot(existingRobot);
 
   schedulePersist();
@@ -1006,22 +1005,25 @@ async function saveRobot(robotInput) {
   return existingRobot;
 }
 
-function loadRobot(robotId) {
+async function loadRobot(robotId) {
   if (authPromptPending) {
     throw new Error("Sign in to the portal before loading robots.");
   }
 
-  const robot = getLocalRobot(robotId);
-
-  if (!robot) {
-    throw new Error("Robot not found.");
+  let refreshed;
+  try {
+    refreshed = await syncRobotFromPortal(robotId, { syncDraft: true });
+  } catch (error) {
+    throw new Error(`Could not load robot from the portal: ${error.message}`);
   }
 
-  draft = createDraftFromRobot(robot);
+  if (!refreshed.robot) {
+    throw new Error(deletedRobotMessage());
+  }
 
   schedulePersist();
   broadcastState();
-  return robot;
+  return refreshed.robot;
 }
 
 async function startRun(payload) {
@@ -1034,33 +1036,27 @@ async function startRun(payload) {
     throw new Error("Select a robot from the portal before running it.");
   }
 
-  const localRobot = getLocalRobot(robotId);
-  if (!localRobot) {
-    throw new Error(deletedRobotMessage());
-  }
-
-  let portalRobot;
+  let refreshedRobot;
   try {
-    portalRobot = await fetchRobotFromPortal(robotId);
+    refreshedRobot = await syncRobotFromPortal(robotId, { syncDraft: false });
   } catch (error) {
     throw new Error(`Could not verify robot availability in the portal: ${error.message}`);
   }
 
-  if (!portalRobot) {
-    const changed = await purgeRobotState(robotId);
-    if (changed) {
+  if (!refreshedRobot.robot) {
+    if (refreshedRobot.changed) {
       schedulePersist();
       broadcastState();
     }
     throw new Error(deletedRobotMessage());
   }
 
-  const effectiveRobot = createLocalRobotFromPortal(portalRobot);
-  Object.assign(localRobot, effectiveRobot);
-  syncDraftWithRobot(localRobot);
+  const localRobot = refreshedRobot.robot;
 
   const startUrl = normalizeUrl(payload.url || draft.url || localRobot.url);
-  const code = typeof payload.code === "string" && payload.code.trim() ? payload.code : draft.code;
+  const code = typeof payload.code === "string" && payload.code.trim()
+    ? payload.code
+    : (draft.code || localRobot.code);
   const robotName = (payload.name || draft.name || localRobot.name || "Untitled Robot").trim();
 
   const run = hydrateRun({
