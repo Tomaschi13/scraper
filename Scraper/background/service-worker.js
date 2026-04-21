@@ -8,6 +8,7 @@ import {
   clearAuthToken,
   setAuthRequiredCallback
 } from "./portal.js";
+import { getPortalOrigin } from "../shared/portal-config.js";
 import "../shared/run-state-helpers.js";
 import "./run-lifecycle-helpers.js";
 import "./runtime-bridge-helpers.js";
@@ -87,6 +88,7 @@ const IDE_WINDOW_OPTIONS = {
 
 const UI_DISCONNECT_ABORT_DELAY_MS = 500;
 const UI_RUN_HISTORY_LIMIT = 20;
+const PORTAL_AUTH_COOKIE_NAME = "auth_token";
 
 const DEFAULT_SCRIPT = `steps.start = function start() {
   const rows = [];
@@ -134,6 +136,7 @@ const ready = initialize();
 
 chrome.action.onClicked.addListener(() => {
   void withReady(async () => {
+    await syncAuthFromPortalSession({ refreshPortalData: false });
     await openIdePage();
     await promptForAuthenticationIfNeeded();
   });
@@ -155,15 +158,35 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 
   void withReady(async () => {
+    await syncAuthFromPortalSession();
     port.postMessage({
       type: "STATE_UPDATED",
       state: buildUiState()
     });
+
+    if (authPromptPending) {
+      await promptForAuthenticationIfNeeded();
+    }
   });
 });
 
 registerRuntimeMessageListener(chrome.runtime.onMessage);
 registerRuntimeMessageListener(chrome.runtime.onUserScriptMessage);
+
+if (chrome.cookies?.onChanged?.addListener) {
+  chrome.cookies.onChanged.addListener((changeInfo) => {
+    void withReady(async () => {
+      if (!(await isPortalAuthCookie(changeInfo?.cookie))) {
+        return;
+      }
+
+      await syncAuthFromPortalSession({
+        closeLoginTabOnSuccess: true,
+        promptIfMissing: uiPorts.size > 0
+      });
+    });
+  });
+}
 
 const legacyServices = {
   logFromTab: (tabId, message, level) => logFromTab(tabId, message, level),
@@ -207,18 +230,16 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 async function initialize() {
   const stored = await chrome.storage.local.get(Object.values(STORAGE_KEYS));
 
-  // Restore auth token from storage into the portal fetch cache.
-  const storedAuth = stored[STORAGE_KEYS.auth];
-  if (storedAuth && typeof storedAuth.token === "string") {
-    setAuthToken(storedAuth.token);
-  }
-
   // When any portal call returns 401, mark auth as required. We only open the
   // login page on explicit user actions so passive worker wake-ups do not
   // spray login tabs across the browser.
   setAuthRequiredCallback(() => {
     authPromptPending = true;
     clearPortalDataForAuthFailure();
+
+    if (uiPorts.size) {
+      void promptForAuthenticationIfNeeded();
+    }
   });
 
   robots = Array.isArray(stored[STORAGE_KEYS.robots]) ? stored[STORAGE_KEYS.robots] : [];
@@ -258,7 +279,11 @@ async function initialize() {
     runtime.runs[runId] = run;
   }
 
-  await syncWithPortal();
+  const hasPortalSession = await syncAuthFromPortalSession({ refreshPortalData: false });
+  if (hasPortalSession) {
+    await syncWithPortal();
+  }
+
   ensureDraftConsistency();
   schedulePersist();
   void ensureUserScriptWorldConfigured().catch(() => null);
@@ -308,11 +333,15 @@ async function syncWithPortal() {
     return null;
   }
 
+  const wasAuthPromptPending = authPromptPending;
   authPromptPending = false;
   const changed = await mergePortalRobotsIntoLocal(portalRobots);
 
   if (changed) {
     schedulePersist();
+  }
+
+  if (changed || wasAuthPromptPending) {
     broadcastState();
   }
 
@@ -335,13 +364,13 @@ function clearPortalDataForAuthFailure() {
   robots = clearedState.robots;
   draft = clearedState.draft;
 
+  clearAuthToken();
   void chrome.storage.local.remove(STORAGE_KEYS.auth).catch(() => null);
 
-  if (!hadVisiblePortalData) {
-    return;
+  if (hadVisiblePortalData) {
+    schedulePersist();
   }
 
-  schedulePersist();
   broadcastState();
 }
 
@@ -350,10 +379,17 @@ async function promptForAuthenticationIfNeeded() {
     return false;
   }
 
-  isReauthenticating = true;
+  return openLoginPage({ markReauthenticating: true });
+}
+
+async function openLoginPage({ markReauthenticating = false } = {}) {
+  if (markReauthenticating) {
+    isReauthenticating = true;
+  }
 
   try {
-    const loginUrl = chrome.runtime.getURL("login/login.html");
+    const portalOrigin = await getPortalOrigin();
+    const loginUrl = new URL("/login", portalOrigin).toString();
     const tabs = await chrome.tabs.query({});
     const existingLoginTab = findLoginTab(tabs, loginUrl);
 
@@ -373,10 +409,122 @@ async function promptForAuthenticationIfNeeded() {
     return true;
   } catch (error) {
     console.warn("[auth] Failed to open login tab:", error instanceof Error ? error.message : String(error));
-    isReauthenticating = false;
+
+    if (markReauthenticating) {
+      isReauthenticating = false;
+    }
+
     loginTabId = null;
     return false;
   }
+}
+
+async function buildPortalRefreshErrorMessage() {
+  const portalOrigin = await getPortalOrigin().catch(() => "");
+  const target = portalOrigin || "the configured portal";
+
+  if (isReauthenticating) {
+    return `Portal login is already open for ${target}. Finish signing in and then refresh robots.`;
+  }
+
+  if (authPromptPending) {
+    return `Sign in to the portal at ${target}. A login window should open automatically when the IDE is open.`;
+  }
+
+  return `Could not reach the portal at ${target}. Check the server URL and that the server is reachable.`;
+}
+
+async function getPortalAuthCookie() {
+  if (!chrome.cookies?.get) {
+    return null;
+  }
+
+  try {
+    const portalOrigin = await getPortalOrigin();
+    return await chrome.cookies.get({
+      url: portalOrigin,
+      name: PORTAL_AUTH_COOKIE_NAME
+    });
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function isPortalAuthCookie(cookie) {
+  if (!cookie || cookie.name !== PORTAL_AUTH_COOKIE_NAME) {
+    return false;
+  }
+
+  try {
+    const portalHost = new URL(await getPortalOrigin()).hostname;
+    const cookieDomain = String(cookie.domain || "").replace(/^\./, "");
+    return cookieDomain === portalHost || portalHost.endsWith(`.${cookieDomain}`);
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function persistAuthRecord(token, user = null) {
+  const stored = await chrome.storage.local.get(STORAGE_KEYS.auth).catch(() => ({}));
+  const previous = isObject(stored[STORAGE_KEYS.auth]) ? stored[STORAGE_KEYS.auth] : {};
+
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.auth]: {
+      token,
+      email: user?.email || previous.email || "",
+      role: user?.role || previous.role || "",
+      storedAt: new Date().toISOString()
+    }
+  });
+}
+
+async function closeLoginTabIfOpen() {
+  if (loginTabId === null) {
+    return;
+  }
+
+  try {
+    await chrome.tabs.remove(loginTabId);
+  } catch (_) {
+    // The tab may already be closed or redirected away.
+  }
+
+  loginTabId = null;
+}
+
+async function syncAuthFromPortalSession({
+  closeLoginTabOnSuccess = false,
+  promptIfMissing = false,
+  refreshPortalData = true
+} = {}) {
+  const cookie = await getPortalAuthCookie();
+
+  if (!cookie?.value) {
+    authPromptPending = true;
+    clearPortalDataForAuthFailure();
+
+    if (promptIfMissing) {
+      await promptForAuthenticationIfNeeded();
+    }
+
+    return false;
+  }
+
+  setAuthToken(cookie.value);
+  authPromptPending = false;
+  isReauthenticating = false;
+  await persistAuthRecord(cookie.value);
+
+  if (closeLoginTabOnSuccess) {
+    await closeLoginTabIfOpen();
+  }
+
+  if (!refreshPortalData) {
+    return true;
+  }
+
+  await syncWithPortal();
+  return true;
 }
 
 async function mergePortalRobotsIntoLocal(portalRobots) {
@@ -471,7 +619,7 @@ async function handleMessage(message, sender) {
       const refreshed = await pullRobotsFromPortal();
       if (refreshed === null) {
         await promptForAuthenticationIfNeeded();
-        return { ok: false, error: "Could not refresh robots from the portal. Make sure it is running and that you are signed in." };
+        return { ok: false, error: await buildPortalRefreshErrorMessage() };
       }
       return { ok: true, state: buildUiState() };
     }
@@ -550,25 +698,11 @@ async function handleAuthComplete(token, user) {
   authPromptPending = false;
 
   // Persist so the token survives service worker restarts.
-  await chrome.storage.local.set({
-    [STORAGE_KEYS.auth]: {
-      token,
-      email: user?.email || "",
-      role: user?.role || "",
-      storedAt: new Date().toISOString()
-    }
-  });
+  await persistAuthRecord(token, user);
 
   // Clear re-auth guard; close login tab if it's still open.
   isReauthenticating = false;
-  if (loginTabId !== null) {
-    try {
-      await chrome.tabs.remove(loginTabId);
-    } catch (_) {
-      // Tab may already be closed by login.js — that's fine.
-    }
-    loginTabId = null;
-  }
+  await closeLoginTabIfOpen();
 
   await syncWithPortal();
   console.log(`[auth] Authenticated as ${user?.email || "unknown"} (${user?.role || "?"})`);
@@ -823,6 +957,10 @@ async function saveRobot(robotInput) {
 
   if (!name) {
     throw new Error("Robot name is required.");
+  }
+
+  if (/\s/.test(name)) {
+    throw new Error("Robot names cannot contain spaces.");
   }
 
   const existingRobot = getLocalRobot(robotId);

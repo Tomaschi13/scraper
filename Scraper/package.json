@@ -2,7 +2,7 @@
   "name": "scraper-ide",
   "version": "0.1.0",
   "private": true,
-  "description": "Chrome extension IDE for the local scraper workflow.",
+  "description": "Chrome extension IDE for a portal-backed scraper workflow.",
   "scripts": {
     "test": "node --test tests/*.test.js"
   },

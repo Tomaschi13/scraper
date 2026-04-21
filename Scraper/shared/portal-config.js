@@ -11,7 +11,7 @@ function canUseChromeStorage() {
     && Boolean(chrome.storage?.onChanged);
 }
 
-function normalizePortalOrigin(origin) {
+export function normalizePortalOrigin(origin) {
   if (typeof origin !== "string") {
     return DEFAULT_PORTAL_ORIGIN;
   }

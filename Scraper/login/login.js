@@ -1,6 +1,7 @@
 import {
   DEFAULT_PORTAL_ORIGIN,
-  getPortalOrigin
+  getPortalOrigin,
+  setPortalOrigin
 } from "../shared/portal-config.js";
 
 /**
@@ -16,6 +17,7 @@ import {
 const AUTH_STORAGE_KEY = "scraper.auth";
 
 const form = document.getElementById("loginForm");
+const portalOriginInput = document.getElementById("portalOrigin");
 const emailInput = document.getElementById("email");
 const passwordInput = document.getElementById("password");
 const submitBtn = document.getElementById("submitBtn");
@@ -25,18 +27,36 @@ const portalOriginLink = document.getElementById("portalOriginLink");
 
 let currentPortalOrigin = DEFAULT_PORTAL_ORIGIN;
 
-async function syncPortalOriginDisplay() {
-  try {
-    currentPortalOrigin = await getPortalOrigin();
-  } catch (_error) {
-    currentPortalOrigin = DEFAULT_PORTAL_ORIGIN;
-  }
-
+function applyPortalOrigin(portalOrigin) {
+  currentPortalOrigin = portalOrigin || DEFAULT_PORTAL_ORIGIN;
+  portalOriginInput.value = currentPortalOrigin;
   portalOriginLink.href = currentPortalOrigin;
   portalOriginLink.textContent = currentPortalOrigin;
 }
 
+async function syncPortalOriginDisplay() {
+  try {
+    applyPortalOrigin(await getPortalOrigin());
+  } catch (_error) {
+    applyPortalOrigin(DEFAULT_PORTAL_ORIGIN);
+  }
+}
+
+async function persistPortalOriginFromInput() {
+  try {
+    applyPortalOrigin(await setPortalOrigin(portalOriginInput.value));
+  } catch (_error) {
+    applyPortalOrigin(DEFAULT_PORTAL_ORIGIN);
+  }
+
+  return currentPortalOrigin;
+}
+
 void syncPortalOriginDisplay();
+
+portalOriginInput.addEventListener("blur", () => {
+  void persistPortalOriginFromInput();
+});
 
 function showError(message) {
   errorMsg.textContent = message;
@@ -75,7 +95,7 @@ form.addEventListener("submit", async (event) => {
   setLoading(true);
 
   try {
-    const portalOrigin = currentPortalOrigin || await getPortalOrigin();
+    const portalOrigin = await persistPortalOriginFromInput();
     const response = await fetch(`${portalOrigin}/api/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -126,7 +146,7 @@ form.addEventListener("submit", async (event) => {
     if (error.message.includes("Failed to fetch") || error.message.includes("NetworkError")) {
       showError(
         "Could not reach the portal. " +
-        `Make sure the server is running at ${currentPortalOrigin}.`
+        `Check that ${currentPortalOrigin} is correct and reachable from this browser.`
       );
     } else {
       showError(`Login error: ${error.message}`);

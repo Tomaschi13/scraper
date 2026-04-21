@@ -21,6 +21,18 @@
 
         <form id="loginForm" novalidate>
           <div class="form-group">
+            <label for="portalOrigin">Portal URL</label>
+            <input
+              type="url"
+              id="portalOrigin"
+              name="portalOrigin"
+              autocomplete="url"
+              spellcheck="false"
+              placeholder="https://portal.example.com"
+            />
+            <p class="field-hint">Use your server URL here when the portal is not running on this computer.</p>
+          </div>
+          <div class="form-group">
             <label for="email">Email</label>
             <input
               type="email"
@@ -48,7 +60,8 @@
 
         <p class="login-hint">
           Accounts are managed by your administrator.<br />
-          Make sure the portal is running at
+          The extension stores the current portal URL here so you can switch between local and server deployments.<br />
+          Current portal:
           <a href="#" id="portalOriginLink" target="_blank" rel="noreferrer"></a>.
         </p>
       </div>

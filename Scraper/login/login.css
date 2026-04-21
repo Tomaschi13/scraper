@@ -125,6 +125,13 @@ body {
   background: #ffffff;
 }
 
+.field-hint {
+  margin: 7px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .form-group input:focus {
   border-color: rgba(37, 99, 235, 0.38);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);

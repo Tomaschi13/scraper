@@ -1,5 +1,5 @@
 const SELECTOR_PREVIEW_DEBOUNCE_MS = 300;
-const AUTH_REQUIRED_MESSAGE = "Sign in to the portal to load robots and code.";
+const AUTH_REQUIRED_MESSAGE = "Sign in to the configured portal to load robots and code. A login window should open automatically.";
 const DEFAULT_PORTAL_MESSAGE = "Use Refresh robots to pull the latest portal changes.";
 const {
   createSearchOptions,
@@ -176,9 +176,20 @@ function bindEvents() {
       closeDropdown();
       return;
     }
-    const items = elements.robotDropdown.querySelectorAll("li");
+
+    if (event.key === "Enter") {
+      const exactMatch = syncRobotSelectionFromInput();
+      const items = getDropdownItems();
+      if (!items.length && exactMatch) {
+        event.preventDefault();
+        void selectRobotFromDropdown(exactMatch);
+        return;
+      }
+    }
+
+    const items = getDropdownItems();
     if (!items.length) return;
-    const active = elements.robotDropdown.querySelector("li.dropdown-active");
+    const active = getActiveDropdownItem();
     let nextIndex = -1;
     if (event.key === "ArrowDown") {
       event.preventDefault();
@@ -188,14 +199,13 @@ function bindEvents() {
       event.preventDefault();
       const currentIndex = active ? Array.from(items).indexOf(active) : items.length;
       nextIndex = (currentIndex - 1 + items.length) % items.length;
-    } else if (event.key === "Enter" && active) {
+    } else if (event.key === "Enter") {
       event.preventDefault();
-      active.click();
+      (active || items[0]).click();
       return;
     }
     if (nextIndex !== -1) {
-      items.forEach((item) => item.classList.remove("dropdown-active"));
-      items[nextIndex].classList.add("dropdown-active");
+      setActiveDropdownItem(items[nextIndex]);
       items[nextIndex].scrollIntoView({ block: "nearest" });
     }
   });
@@ -637,6 +647,7 @@ function renderDraft() {
 
 function renderRobots() {
   const currentValue = state.draft?.selectedRobotId || "";
+  const shouldRefreshDropdown = document.activeElement === elements.robotNameInput;
 
   elements.robotSelect.innerHTML = "";
   closeDropdown();
@@ -653,6 +664,10 @@ function renderRobots() {
     selectOption.selected = robot.id === currentValue;
     elements.robotSelect.append(selectOption);
   });
+
+  if (shouldRefreshDropdown) {
+    updateDropdown();
+  }
 }
 
 function renderPortalStatus() {
@@ -684,20 +699,24 @@ function updateDropdown() {
   }
 
   elements.robotDropdown.innerHTML = "";
-  matches.forEach((robot) => {
+  matches.forEach((robot, index) => {
     const item = document.createElement("li");
     item.textContent = robot.name;
-    item.style.cssText = "padding:8px 12px;cursor:pointer;font-size:14px;color:#333;border-bottom:1px solid #f0f0f0;";
     item.addEventListener("mouseenter", () => {
-      elements.robotDropdown.querySelectorAll("li").forEach((li) => li.classList.remove("dropdown-active"));
-      item.classList.add("dropdown-active");
+      setActiveDropdownItem(item);
     });
-    item.addEventListener("mousedown", async (event) => {
+    item.addEventListener("mousedown", (event) => {
       event.preventDefault();
-      elements.robotNameInput.value = robot.name;
-      closeDropdown();
-      await loadRobot(robot.id);
     });
+    item.addEventListener("click", async (event) => {
+      event.preventDefault();
+      await selectRobotFromDropdown(robot);
+    });
+
+    if (index === 0) {
+      item.classList.add("dropdown-active");
+    }
+
     elements.robotDropdown.append(item);
   });
 
@@ -707,6 +726,24 @@ function updateDropdown() {
 function closeDropdown() {
   elements.robotDropdown.style.display = "none";
   elements.robotDropdown.innerHTML = "";
+}
+
+function getDropdownItems() {
+  return Array.from(elements.robotDropdown.querySelectorAll("li"));
+}
+
+function getActiveDropdownItem() {
+  return elements.robotDropdown.querySelector("li.dropdown-active");
+}
+
+function setActiveDropdownItem(nextItem) {
+  getDropdownItems().forEach((item) => item.classList.toggle("dropdown-active", item === nextItem));
+}
+
+async function selectRobotFromDropdown(robot) {
+  elements.robotNameInput.value = robot.name;
+  closeDropdown();
+  await loadRobot(robot.id);
 }
 
 function renderRunSummary() {

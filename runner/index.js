@@ -116,7 +116,7 @@ function parseJsonOption(rawValue, label) {
 function usage() {
   return [
     "Usage:",
-    "  npm start --prefix runner -- --portal-origin http://127.0.0.1:5077 --email admin@example.com --password secret --robot-id robot_123",
+    "  npm start --prefix runner -- --portal-origin https://portal.example.com --email admin@example.com --password secret --robot-id robot_123",
     "",
     "Options:",
     "  --portal-origin      Portal base URL. Default: http://127.0.0.1:5077",

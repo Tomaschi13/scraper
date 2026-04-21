@@ -1,8 +1,8 @@
 # Scraper IDE
 
-This workspace now owns the **Chrome extension IDE** only. The local portal lives as a sibling project at `/Users/tomas/Desktop/full scraper/portal`.
+This workspace now owns the **Chrome extension IDE** only. The portal lives as a sibling project at `/Users/tomas/Desktop/full scraper/portal` and can run either locally or on a server.
 
-## 1. Start the portal
+## 1. Start or choose a portal
 
 ```bash
 cd "/Users/tomas/Desktop/full scraper/portal"
@@ -10,7 +10,8 @@ npm install      # first time only
 npm start
 ```
 
-The portal serves the robot catalog and run history at **http://127.0.0.1:5077**.
+For local development, the default portal URL is **http://127.0.0.1:5077**.
+For server deployments, open the extension sign-in page and replace the Portal URL with your server origin.
 
 ## 2. Load the Chrome extension
 
@@ -19,6 +20,7 @@ The portal serves the robot catalog and run history at **http://127.0.0.1:5077**
 3. Click **Load unpacked** → select `/Users/tomas/Desktop/full scraper/Scraper`.
 4. Open the extension **Details** page and enable **Allow User Scripts**.
 5. Click the toolbar icon to open the IDE.
+6. If you are not signed in, opening the IDE should automatically open the extension's sign-in window so robots can be loaded again after auth succeeds.
 
 The IDE syncs robots once when it opens. After that, use the new **Refresh robots** button when you want to pull the latest list from the portal.
 
@@ -34,7 +36,7 @@ Chrome extension IDE
       │  POST /api/runs          (on Run start)
       │  PUT  /api/runs/:id      (on emit / step done / finish)
       ▼
-  Portal (sibling project)
+  Portal (local or server)
       │
       └─ PostgreSQL
 ```

@@ -38,7 +38,7 @@ steps.start = async function start() {
   setRetries(90000, 2, 500);
   setSettings({ skipVisited: true });
 
-  await wait(1500);
+  await sleep(1500);
 
   var categoryUrl = stripPagingParams(location.href);
 
@@ -59,7 +59,7 @@ steps.grid = async function grid(params) {
     "nav[aria-label*='Puslapi'] a[href], nav[aria-label*='pagination'] a[href], .pagination a[href], [class*='pagination'] a[href]";
 
   await waitFor(cardSelector, 20000);
-  await wait(2000);
+  await sleep(2000);
 
   var categoryUrl = stripPagingParams(params && params.category_url ? params.category_url : location.href);
   var pageSize = params && params.page_size ? params.page_size : PAGE_SIZE;
@@ -308,7 +308,7 @@ steps.product_page = async function product_page(seed) {
     // Emit the seeded row if the product page never fully stabilizes.
   }
 
-  await wait(2500);
+  await sleep(2500);
 
   var pageText = normalizeText(document.body ? document.body.innerText : "");
   var pageLines = String(document.body ? document.body.innerText : "")
@@ -650,6 +650,12 @@ function canonicalizeUrl(url) {
   } catch (error) {
     return "";
   }
+}
+
+function sleep(ms) {
+  return new Promise(function resolveAfterDelay(resolve) {
+    setTimeout(resolve, Number(ms) || 0);
+  });
 }
 
 function normalizeText(value) {
