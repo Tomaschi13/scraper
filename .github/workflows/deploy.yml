@@ -1,0 +1,115 @@
+name: Deploy Scraper
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: scraper-deploy-main
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            Scraper/package-lock.json
+            runner/package-lock.json
+
+      - name: Install Scraper test dependencies
+        run: npm ci --prefix Scraper
+
+      - name: Run Scraper test suite
+        run: npm test --prefix Scraper
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    environment:
+      name: production
+    env:
+      SCRAPER_DEPLOY_HOST: 178.104.237.206
+      SCRAPER_DEPLOY_PORT: 22
+      SCRAPER_DEPLOY_USER: deploy
+      # The GitHub Actions SSH user can write here today without extra server changes.
+      SCRAPER_DEPLOY_PATH: /home/deploy/scraper
+      # Leave restart blank until a dedicated scraper-runner service is created.
+      SCRAPER_DEPLOY_RESTART_COMMAND: ""
+      SCRAPER_DEPLOY_ENV_FILE: ""
+      SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH: /home/deploy/ms-playwright
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate deploy secret
+        env:
+          SCRAPER_DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.SCRAPER_DEPLOY_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SCRAPER_DEPLOY_SSH_PRIVATE_KEY:-}" ]; then
+            echo "::error::Missing required GitHub secret: SCRAPER_DEPLOY_SSH_PRIVATE_KEY"
+            exit 1
+          fi
+
+      - name: Configure SSH
+        env:
+          SCRAPER_DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.SCRAPER_DEPLOY_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SCRAPER_DEPLOY_SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          cp .github/known_hosts/scraper-production ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Ensure remote deploy path exists
+        run: |
+          set -euo pipefail
+          ssh -p "$SCRAPER_DEPLOY_PORT" "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST" \
+            "mkdir -p $(printf '%q' "$SCRAPER_DEPLOY_PATH") $(printf '%q' "$SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH")"
+
+      - name: Sync files to server
+        run: |
+          set -euo pipefail
+          rsync -rlz --delete \
+            --exclude ".git/" \
+            --exclude ".github/" \
+            --exclude ".DS_Store" \
+            --exclude "._*" \
+            --exclude ".claude/" \
+            --exclude "Scraper/node_modules/" \
+            --exclude "runner/node_modules/" \
+            --exclude "coverage/" \
+            --exclude "playwright-report/" \
+            --exclude "test-results/" \
+            --exclude ".env" \
+            --exclude ".env.*" \
+            --exclude "*.log" \
+            -e "ssh -p $SCRAPER_DEPLOY_PORT" \
+            ./ "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST:$SCRAPER_DEPLOY_PATH/"
+
+      - name: Run remote deploy script
+        run: |
+          set -euo pipefail
+
+          remote_path=$(printf '%q' "$SCRAPER_DEPLOY_PATH")
+          remote_restart_command=$(printf '%q' "$SCRAPER_DEPLOY_RESTART_COMMAND")
+          remote_env_file=$(printf '%q' "$SCRAPER_DEPLOY_ENV_FILE")
+          remote_browsers_path=$(printf '%q' "$SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH")
+
+          ssh -p "$SCRAPER_DEPLOY_PORT" "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST" \
+            "cd $remote_path && SCRAPER_DEPLOY_RESTART_COMMAND=$remote_restart_command SCRAPER_DEPLOY_ENV_FILE=$remote_env_file SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH=$remote_browsers_path bash scripts/deploy-remote.sh"
