@@ -117,26 +117,5 @@ jobs:
       - name: Install runner deps and restart service
         run: |
           set -euo pipefail
-
-          runner_path=$(printf '%q' "$SCRAPER_DEPLOY_RUNNER_PATH")
-          browsers_path=$(printf '%q' "$SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH")
-          restart_command=$(printf '%q' "$SCRAPER_DEPLOY_RESTART_COMMAND")
-
-          ssh -p "$SCRAPER_DEPLOY_PORT" "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST" bash -s <<REMOTE
-          set -euo pipefail
-          export NODE_ENV=production
-          export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-          export PLAYWRIGHT_BROWSERS_PATH=$browsers_path
-          mkdir -p "\$PLAYWRIGHT_BROWSERS_PATH"
-
-          cd $runner_path
-          echo "Installing runner production dependencies..."
-          npm ci --omit=dev
-
-          echo "Ensuring Playwright Chromium is installed..."
-          npx playwright install chromium
-
-          echo "Restarting scraper-portal service..."
-          $restart_command
-          echo "Deploy complete."
-          REMOTE
+          ssh -p "$SCRAPER_DEPLOY_PORT" "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST" \
+            "cd $(printf '%q' "$SCRAPER_DEPLOY_RUNNER_PATH") && PLAYWRIGHT_BROWSERS_PATH=$(printf '%q' "$SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH") RESTART_COMMAND=$(printf '%q' "$SCRAPER_DEPLOY_RESTART_COMMAND") bash scripts/deploy.sh"
