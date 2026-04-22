@@ -71,6 +71,11 @@ const RUN_STATUS = {
   aborted: "ABORTED"
 };
 
+const RUN_SOURCE = {
+  localExtension: "LOCAL_EXTENSION",
+  portalServer: "PORTAL_SERVER"
+};
+
 const DEFAULT_CONFIG = {
   skipVisited: false,
   respectRobotsTxt: false,
@@ -814,7 +819,8 @@ function summarizeRunListItem(run) {
     currentStep: run.currentStep,
     failures: run.failures,
     emits: run.emits,
-    rows: run.rows
+    rows: run.rows,
+    runSource: run.runSource
   };
 }
 
@@ -842,7 +848,8 @@ function summarizeRun(run) {
     emits: run.emits,
     rows: run.rows,
     retries: run.retries,
-    config: run.config
+    config: run.config,
+    runSource: run.runSource
   };
 }
 
@@ -873,6 +880,9 @@ function hydrateRun(run) {
     failures: Number.isFinite(run.failures) ? run.failures : 0,
     emits: Number.isFinite(run.emits) ? run.emits : 0,
     rows: Number.isFinite(run.rows) ? run.rows : 0,
+    runSource: run.runSource === RUN_SOURCE.portalServer
+      ? RUN_SOURCE.portalServer
+      : RUN_SOURCE.localExtension,
     visitedUrls: Array.isArray(run.visitedUrls) ? run.visitedUrls : [],
     visitedMap: isObject(run.visitedMap) ? run.visitedMap : {},
     code: typeof run.code === "string" ? run.code : DEFAULT_SCRIPT,
@@ -1052,6 +1062,9 @@ async function startRun(payload) {
   }
 
   const localRobot = refreshedRobot.robot;
+  const runSource = payload.runSource === RUN_SOURCE.portalServer
+    ? RUN_SOURCE.portalServer
+    : RUN_SOURCE.localExtension;
 
   const startUrl = normalizeUrl(payload.url || draft.url || localRobot.url);
   const code = typeof payload.code === "string" && payload.code.trim()
@@ -1082,6 +1095,7 @@ async function startRun(payload) {
     failures: 0,
     emits: 0,
     rows: 0,
+    runSource,
     visitedUrls: [],
     visitedMap: {},
     code
@@ -1706,6 +1720,7 @@ function updateSnapshot(run) {
     failures: run.failures,
     emits: run.emits,
     rows: run.rows,
+    runSource: run.runSource,
     visitedUrls: clone(run.visitedUrls),
     visitedMap: clone(run.visitedMap),
     code: run.code
@@ -1841,6 +1856,7 @@ function serializeRun(run) {
     failures: run.failures,
     emits: run.emits,
     rows: run.rows,
+    runSource: run.runSource,
     visitedUrls: run.visitedUrls,
     visitedMap: run.visitedMap,
     code: run.code,

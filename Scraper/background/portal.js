@@ -16,6 +16,10 @@ import { portalUrl } from "../shared/portal-config.js";
 
 // In-memory token cache. Populated from chrome.storage on service worker init.
 let cachedToken = null;
+const RUN_SOURCE = {
+  localExtension: "LOCAL_EXTENSION",
+  portalServer: "PORTAL_SERVER"
+};
 
 // Registered by the service worker; fired when a 401 is received.
 let authRequiredCallback = null;
@@ -191,6 +195,9 @@ function buildRunPayload(run) {
     emits: run.emits || 0,
     rows: run.rows || 0,
     retries: run.retries || null,
-    config: run.config || null
+    config: run.config || null,
+    runSource: run.runSource === RUN_SOURCE.portalServer
+      ? RUN_SOURCE.portalServer
+      : RUN_SOURCE.localExtension
   };
 }

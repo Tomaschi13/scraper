@@ -6,6 +6,10 @@ const path = require("node:path");
 const process = require("node:process");
 
 let chromium;
+const RUNNER_EVENT_PREFIX = "RUNNER_EVENT ";
+const RUN_SOURCE = {
+  portalServer: "PORTAL_SERVER"
+};
 
 try {
   ({ chromium } = require("playwright"));
@@ -111,6 +115,10 @@ function parseJsonOption(rawValue, label) {
   } catch (error) {
     throw new Error(`Could not parse ${label} as JSON: ${error.message}`);
   }
+}
+
+function emitRunnerEvent(event, payload = {}) {
+  console.log(`${RUNNER_EVENT_PREFIX}${JSON.stringify({ event, ...payload })}`);  // eslint-disable-line no-console
 }
 
 function usage() {
@@ -222,6 +230,7 @@ async function callBridge(page, method, payload) {
 function buildStartPayload(config) {
   return {
     robotId: config.robotId,
+    runSource: RUN_SOURCE.portalServer,
     ...(config.step ? { step: config.step } : {}),
     ...(config.startUrl ? { url: config.startUrl } : {}),
     ...(config.tag ? { tag: config.tag } : {}),
@@ -322,9 +331,25 @@ async function run() {
       throw new Error("The extension did not return a run id.");
     }
 
+    emitRunnerEvent("RUN_STARTED", {
+      runId: runSummary.id,
+      robotId: runSummary.robotId,
+      startedAt: runSummary.startedAt || new Date().toISOString()
+    });
     console.log(`Started run ${runSummary.id} for robot ${runSummary.robotId}.`);  // eslint-disable-line no-console
 
     const finalRun = await monitorRun(bridgePage, runSummary.id, config.pollIntervalMs);
+    emitRunnerEvent(
+      finalRun.status === "FINISHED"
+        ? "RUN_FINISHED"
+        : (finalRun.status === "ABORTED" ? "RUN_ABORTED" : "RUN_FAILED"),
+      {
+        runId: finalRun.id,
+        robotId: finalRun.robotId,
+        finishedAt: finalRun.finishedAt || null,
+        status: finalRun.status
+      }
+    );
     console.log(JSON.stringify({ ok: true, run: finalRun }, null, 2));  // eslint-disable-line no-console
 
     if (finalRun.status !== "FINISHED") {
@@ -338,6 +363,9 @@ async function run() {
 }
 
 run().catch((error) => {
+  emitRunnerEvent("RUN_ERROR", {
+    message: error instanceof Error ? error.message : String(error)
+  });
   console.error(error instanceof Error ? error.message : String(error));  // eslint-disable-line no-console
   process.exitCode = 1;
 });
