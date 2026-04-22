@@ -214,6 +214,10 @@ function usage() {
     "  --user-data-dir      Persistent Chromium profile directory",
     "  --extension-path     Extension source directory. Default: ../Scraper",
     "  --browser-channel    Playwright channel: chromium | chrome | msedge. Default: chromium",
+    "  --proxy-server       Upstream proxy, e.g. http://host:port or socks5://host:port",
+    "  --proxy-username     Proxy auth username (optional)",
+    "  --proxy-password     Proxy auth password (optional)",
+    "  --proxy-bypass       Comma-separated bypass list, e.g. 127.0.0.1,localhost",
     "  --headless           Run Chromium headless",
     "  --headed             Run Chromium headed (recommended first with Xvfb on servers)",
     "  --poll-interval-ms   Run status polling interval. Default: 2000",
@@ -257,8 +261,46 @@ function buildConfig(options) {
       options["browser-channel"]
         || process.env.RUNNER_BROWSER_CHANNEL
         || "chromium"
-    ).trim() || "chromium"
+    ).trim() || "chromium",
+    proxy: buildProxyConfig(options)
   };
+}
+
+function buildProxyConfig(options) {
+  const server = String(options["proxy-server"] || process.env.RUNNER_PROXY_SERVER || "").trim();
+  if (!server) {
+    return null;
+  }
+
+  const normalizedServer = /^[a-z][a-z0-9+.-]*:\/\//i.test(server) ? server : `http://${server}`;
+  const username = String(options["proxy-username"] || process.env.RUNNER_PROXY_USERNAME || "").trim();
+  const password = String(options["proxy-password"] || process.env.RUNNER_PROXY_PASSWORD || "");
+  const bypass = String(options["proxy-bypass"] || process.env.RUNNER_PROXY_BYPASS || "").trim();
+
+  const config = { server: normalizedServer };
+  if (username) {
+    config.username = username;
+  }
+  if (password) {
+    config.password = password;
+  }
+  if (bypass) {
+    config.bypass = bypass;
+  }
+  return config;
+}
+
+function describeProxy(proxy) {
+  if (!proxy || !proxy.server) {
+    return "none";
+  }
+  try {
+    const parsed = new URL(proxy.server);
+    const auth = proxy.username ? `${proxy.username}:***@` : "";
+    return `${parsed.protocol}//${auth}${parsed.host}`;
+  } catch (_error) {
+    return proxy.username ? `${proxy.username}:***@${proxy.server}` : proxy.server;
+  }
 }
 
 function validateConfig(config) {
@@ -480,6 +522,8 @@ async function run() {
   try {
     const browserChromium = loadChromium();
 
+    console.log(`Upstream proxy: ${describeProxy(config.proxy)}`);  // eslint-disable-line no-console
+
     context = await browserChromium.launchPersistentContext(config.userDataDir, {
       channel: config.browserChannel,
       headless: config.headless,
@@ -489,6 +533,7 @@ async function run() {
       viewport: STEALTH_VIEWPORT,
       extraHTTPHeaders: STEALTH_EXTRA_HEADERS,
       ignoreDefaultArgs: ["--enable-automation"],
+      ...(config.proxy ? { proxy: config.proxy } : {}),
       args: [
         ...STEALTH_LAUNCH_ARGS,
         `--disable-extensions-except=${config.extensionPath}`,
@@ -570,7 +615,9 @@ if (require.main === module) {
 
 module.exports = {
   buildConfig,
+  buildProxyConfig,
   buildStartPayload,
+  describeProxy,
   getRunFromState,
   resolveRobotStartUrl,
   waitForRunnablePage,
