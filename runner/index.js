@@ -213,6 +213,7 @@ function usage() {
     "  --config-json        Optional JSON payload for run config",
     "  --user-data-dir      Persistent Chromium profile directory",
     "  --extension-path     Extension source directory. Default: ../Scraper",
+    "  --browser-channel    Playwright channel: chromium | chrome | msedge. Default: chromium",
     "  --headless           Run Chromium headless",
     "  --headed             Run Chromium headed (recommended first with Xvfb on servers)",
     "  --poll-interval-ms   Run status polling interval. Default: 2000",
@@ -251,7 +252,12 @@ function buildConfig(options) {
       options["extension-path"]
         || process.env.RUNNER_EXTENSION_PATH
         || path.join(__dirname, "..", "Scraper")
-    )
+    ),
+    browserChannel: String(
+      options["browser-channel"]
+        || process.env.RUNNER_BROWSER_CHANNEL
+        || "chromium"
+    ).trim() || "chromium"
   };
 }
 
@@ -475,7 +481,7 @@ async function run() {
     const browserChromium = loadChromium();
 
     context = await browserChromium.launchPersistentContext(config.userDataDir, {
-      channel: "chromium",
+      channel: config.browserChannel,
       headless: config.headless,
       userAgent: STEALTH_USER_AGENT,
       locale: STEALTH_LOCALE,
