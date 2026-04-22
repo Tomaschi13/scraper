@@ -279,7 +279,7 @@ async function waitForServiceWorker(context) {
     return existing[0];
   }
 
-  return context.waitForEvent("serviceworker");
+  return context.waitForEvent("serviceworker", { timeout: 90_000 });
 }
 
 function getExtensionId(serviceWorker) {
