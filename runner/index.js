@@ -4,19 +4,94 @@
 const os = require("node:os");
 const path = require("node:path");
 const process = require("node:process");
+const {
+  getBlockedPageError
+} = require("../Scraper/background/run-lifecycle-helpers.js");
 
 let chromium;
 const RUNNER_EVENT_PREFIX = "RUNNER_EVENT ";
 const RUN_SOURCE = {
   portalServer: "PORTAL_SERVER"
 };
+const DEFAULT_START_URL_WARMUP_TIMEOUT_MS = 45_000;
+const DEFAULT_START_URL_WARMUP_POLL_INTERVAL_MS = 750;
+const DEFAULT_START_URL_WARMUP_RELOAD_AFTER_MS = 12_000;
 
-try {
-  ({ chromium } = require("playwright"));
-} catch (error) {
-  console.error("The runner needs the \"playwright\" package.");  // eslint-disable-line no-console
-  console.error("Install it with: npm install --prefix runner");  // eslint-disable-line no-console
-  throw error;
+const STEALTH_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const STEALTH_LOCALE = "en-US";
+const STEALTH_TIMEZONE = "Europe/Vilnius";
+const STEALTH_VIEWPORT = { width: 1440, height: 900 };
+const STEALTH_LAUNCH_ARGS = [
+  "--disable-blink-features=AutomationControlled",
+  "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
+  "--no-first-run",
+  "--no-default-browser-check",
+  "--disable-infobars",
+  "--disable-dev-shm-usage",
+  "--disable-background-timer-throttling",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
+  "--lang=en-US,en"
+];
+const STEALTH_EXTRA_HEADERS = {
+  "Accept-Language": "en-US,en;q=0.9",
+  "Sec-CH-UA": "\"Chromium\";v=\"131\", \"Not_A Brand\";v=\"24\", \"Google Chrome\";v=\"131\"",
+  "Sec-CH-UA-Mobile": "?0",
+  "Sec-CH-UA-Platform": "\"macOS\""
+};
+
+const STEALTH_INIT_SCRIPT = `
+  try {
+    Object.defineProperty(Object.getPrototypeOf(navigator), 'webdriver', { get: () => undefined });
+  } catch (_err) {}
+  try {
+    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+  } catch (_err) {}
+  try {
+    Object.defineProperty(navigator, 'plugins', {
+      get: () => [
+        { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }
+      ]
+    });
+  } catch (_err) {}
+  try {
+    window.chrome = window.chrome || { runtime: {}, loadTimes: function () {}, csi: function () {}, app: {} };
+  } catch (_err) {}
+  try {
+    const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+    if (originalQuery) {
+      window.navigator.permissions.query = (parameters) => (
+        parameters && parameters.name === 'notifications'
+          ? Promise.resolve({ state: Notification.permission })
+          : originalQuery.call(window.navigator.permissions, parameters)
+      );
+    }
+  } catch (_err) {}
+  try {
+    const getParameter = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function (parameter) {
+      if (parameter === 37445) return 'Intel Inc.';
+      if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+      return getParameter.call(this, parameter);
+    };
+  } catch (_err) {}
+`;
+
+function loadChromium() {
+  if (chromium) {
+    return chromium;
+  }
+
+  try {
+    ({ chromium } = require("playwright"));
+    return chromium;
+  } catch (error) {
+    console.error("The runner needs the \"playwright\" package.");  // eslint-disable-line no-console
+    console.error("Install it with: npm install --prefix runner");  // eslint-disable-line no-console
+    throw error;
+  }
 }
 
 function parseArgs(argv) {
@@ -253,6 +328,103 @@ function getRunFromState(state, runId) {
     : null;
 }
 
+function resolveRobotStartUrl(config, refreshResult) {
+  if (config.startUrl) {
+    return config.startUrl;
+  }
+
+  const robots = Array.isArray(refreshResult?.state?.robots) ? refreshResult.state.robots : [];
+  const matchedRobot = robots.find((robot) => String(robot?.id || "").trim() === config.robotId);
+  return String(matchedRobot?.url || "").trim();
+}
+
+async function humanizePage(page) {
+  try {
+    const { width, height } = STEALTH_VIEWPORT;
+    await page.mouse.move(Math.floor(width * 0.3), Math.floor(height * 0.4));
+    await page.waitForTimeout(250 + Math.floor(Math.random() * 400));
+    await page.mouse.move(Math.floor(width * 0.55), Math.floor(height * 0.6), { steps: 8 });
+    await page.waitForTimeout(150 + Math.floor(Math.random() * 250));
+    await page.mouse.wheel(0, 120);
+  } catch (_error) {
+    // Humanization is best-effort; ignore failures.
+  }
+}
+
+async function waitForRunnablePage(page, {
+  timeoutMs = DEFAULT_START_URL_WARMUP_TIMEOUT_MS,
+  pollIntervalMs = DEFAULT_START_URL_WARMUP_POLL_INTERVAL_MS,
+  reloadAfterMs = DEFAULT_START_URL_WARMUP_RELOAD_AFTER_MS,
+  startUrl = ""
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let lastBlockedError = "";
+  let lastReloadAt = Date.now();
+  let humanized = false;
+
+  for (;;) {
+    const pageTitle = await page.title().catch(() => "");
+    const pageUrl = typeof page.url === "function" ? page.url() : "";
+    const blockedPageError = getBlockedPageError({ pageTitle, pageUrl });
+
+    if (!blockedPageError) {
+      return {
+        pageTitle,
+        pageUrl
+      };
+    }
+
+    lastBlockedError = blockedPageError;
+
+    if (!humanized) {
+      humanized = true;
+      await humanizePage(page);
+    }
+
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for the start page to clear. ${lastBlockedError}`);
+    }
+
+    if (startUrl && Date.now() - lastReloadAt >= reloadAfterMs) {
+      lastReloadAt = Date.now();
+      try {
+        await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
+      } catch (_error) {
+        // Retry via polling; the next iteration will re-check the page state.
+      }
+    }
+
+    await page.waitForTimeout(Math.min(pollIntervalMs, Math.max(deadline - Date.now(), 0)));
+  }
+}
+
+async function warmRobotStartUrl(context, startUrl) {
+  if (!startUrl) {
+    return null;
+  }
+
+  const page = await context.newPage();
+
+  try {
+    // Warm the origin with a referer-less visit to the site root when possible,
+    // so the actual target request carries realistic cookies/session state.
+    try {
+      const origin = new URL(startUrl).origin;
+      if (origin && origin !== startUrl) {
+        await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => null);
+        await page.waitForTimeout(1_200 + Math.floor(Math.random() * 800));
+      }
+    } catch (_error) {
+      // Ignore URL parsing issues and fall through to the direct navigation.
+    }
+
+    await page.goto(startUrl, { waitUntil: "domcontentloaded" });
+    return await waitForRunnablePage(page, { startUrl });
+  } finally {
+    await page.close().catch(() => null);
+  }
+}
+
 async function monitorRun(page, runId, intervalMs) {
   let previousSummary = "";
   let seenLogCount = 0;
@@ -300,14 +472,25 @@ async function run() {
   let context;
 
   try {
-    context = await chromium.launchPersistentContext(config.userDataDir, {
+    const browserChromium = loadChromium();
+
+    context = await browserChromium.launchPersistentContext(config.userDataDir, {
       channel: "chromium",
       headless: config.headless,
+      userAgent: STEALTH_USER_AGENT,
+      locale: STEALTH_LOCALE,
+      timezoneId: STEALTH_TIMEZONE,
+      viewport: STEALTH_VIEWPORT,
+      extraHTTPHeaders: STEALTH_EXTRA_HEADERS,
+      ignoreDefaultArgs: ["--enable-automation"],
       args: [
+        ...STEALTH_LAUNCH_ARGS,
         `--disable-extensions-except=${config.extensionPath}`,
         `--load-extension=${config.extensionPath}`
       ]
     });
+
+    await context.addInitScript(STEALTH_INIT_SCRIPT);
 
     const serviceWorker = await waitForServiceWorker(context);
     const extensionId = getExtensionId(serviceWorker);
@@ -324,6 +507,13 @@ async function run() {
     const refreshResult = await callBridge(bridgePage, "refreshRobots");
     const robotCount = Array.isArray(refreshResult?.state?.robots) ? refreshResult.state.robots.length : 0;
     console.log(`Loaded ${robotCount} robot(s) from the portal.`);  // eslint-disable-line no-console
+
+    const resolvedStartUrl = resolveRobotStartUrl(config, refreshResult);
+    if (resolvedStartUrl) {
+      console.log(`Priming start URL ${resolvedStartUrl} before starting the run.`);  // eslint-disable-line no-console
+      const warmedPage = await warmRobotStartUrl(context, resolvedStartUrl);
+      console.log(`Start URL is runnable at ${warmedPage.pageUrl}.`);  // eslint-disable-line no-console
+    }
 
     const startResponse = await callBridge(bridgePage, "startRun", buildStartPayload(config));
     const runSummary = startResponse?.run;
@@ -362,10 +552,21 @@ async function run() {
   }
 }
 
-run().catch((error) => {
-  emitRunnerEvent("RUN_ERROR", {
-    message: error instanceof Error ? error.message : String(error)
+if (require.main === module) {
+  run().catch((error) => {
+    emitRunnerEvent("RUN_ERROR", {
+      message: error instanceof Error ? error.message : String(error)
+    });
+    console.error(error instanceof Error ? error.message : String(error));  // eslint-disable-line no-console
+    process.exitCode = 1;
   });
-  console.error(error instanceof Error ? error.message : String(error));  // eslint-disable-line no-console
-  process.exitCode = 1;
-});
+}
+
+module.exports = {
+  buildConfig,
+  buildStartPayload,
+  getRunFromState,
+  resolveRobotStartUrl,
+  waitForRunnablePage,
+  warmRobotStartUrl
+};
