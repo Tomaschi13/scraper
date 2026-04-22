@@ -32,6 +32,14 @@ jobs:
       - name: Run Scraper test suite
         run: npm test --prefix Scraper
 
+      - name: Install runner dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: npm ci --prefix runner
+
+      - name: Run runner test suite
+        run: npm test --prefix runner
+
   deploy:
     needs: test
     runs-on: ubuntu-latest
@@ -44,12 +52,10 @@ jobs:
       SCRAPER_DEPLOY_HOST: 178.104.237.206
       SCRAPER_DEPLOY_PORT: 22
       SCRAPER_DEPLOY_USER: deploy
-      # The GitHub Actions SSH user can write here today without extra server changes.
-      SCRAPER_DEPLOY_PATH: /home/deploy/scraper
-      # Leave restart blank until a dedicated scraper-runner service is created.
-      SCRAPER_DEPLOY_RESTART_COMMAND: ""
-      SCRAPER_DEPLOY_ENV_FILE: ""
-      SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH: /home/deploy/ms-playwright
+      SCRAPER_DEPLOY_RUNNER_PATH: /opt/runner
+      SCRAPER_DEPLOY_EXTENSION_PATH: /opt/Scraper
+      SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
+      SCRAPER_DEPLOY_RESTART_COMMAND: sudo /usr/bin/systemctl restart scraper-portal
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -76,40 +82,61 @@ jobs:
           cp .github/known_hosts/scraper-production ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
-      - name: Ensure remote deploy path exists
+      - name: Ensure remote deploy paths exist
         run: |
           set -euo pipefail
           ssh -p "$SCRAPER_DEPLOY_PORT" "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST" \
-            "mkdir -p $(printf '%q' "$SCRAPER_DEPLOY_PATH") $(printf '%q' "$SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH")"
+            "mkdir -p $(printf '%q' "$SCRAPER_DEPLOY_RUNNER_PATH") $(printf '%q' "$SCRAPER_DEPLOY_EXTENSION_PATH") $(printf '%q' "$SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH")"
 
-      - name: Sync files to server
+      - name: Sync runner to server
         run: |
           set -euo pipefail
           rsync -rlz --delete \
-            --exclude ".git/" \
-            --exclude ".github/" \
             --exclude ".DS_Store" \
             --exclude "._*" \
-            --exclude ".claude/" \
-            --exclude "Scraper/node_modules/" \
-            --exclude "runner/node_modules/" \
+            --exclude "node_modules/" \
             --exclude "coverage/" \
-            --exclude "playwright-report/" \
             --exclude "test-results/" \
-            --exclude ".env" \
-            --exclude ".env.*" \
             --exclude "*.log" \
             -e "ssh -p $SCRAPER_DEPLOY_PORT" \
-            ./ "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST:$SCRAPER_DEPLOY_PATH/"
+            ./runner/ "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST:$SCRAPER_DEPLOY_RUNNER_PATH/"
 
-      - name: Run remote deploy script
+      - name: Sync Scraper extension to server
+        run: |
+          set -euo pipefail
+          rsync -rlz --delete \
+            --exclude ".DS_Store" \
+            --exclude "._*" \
+            --exclude "node_modules/" \
+            --exclude "coverage/" \
+            --exclude "tests/" \
+            --exclude "*.log" \
+            -e "ssh -p $SCRAPER_DEPLOY_PORT" \
+            ./Scraper/ "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST:$SCRAPER_DEPLOY_EXTENSION_PATH/"
+
+      - name: Install runner deps and restart service
         run: |
           set -euo pipefail
 
-          remote_path=$(printf '%q' "$SCRAPER_DEPLOY_PATH")
-          remote_restart_command=$(printf '%q' "$SCRAPER_DEPLOY_RESTART_COMMAND")
-          remote_env_file=$(printf '%q' "$SCRAPER_DEPLOY_ENV_FILE")
-          remote_browsers_path=$(printf '%q' "$SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH")
+          runner_path=$(printf '%q' "$SCRAPER_DEPLOY_RUNNER_PATH")
+          browsers_path=$(printf '%q' "$SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH")
+          restart_command=$(printf '%q' "$SCRAPER_DEPLOY_RESTART_COMMAND")
 
-          ssh -p "$SCRAPER_DEPLOY_PORT" "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST" \
-            "cd $remote_path && SCRAPER_DEPLOY_RESTART_COMMAND=$remote_restart_command SCRAPER_DEPLOY_ENV_FILE=$remote_env_file SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH=$remote_browsers_path bash scripts/deploy-remote.sh"
+          ssh -p "$SCRAPER_DEPLOY_PORT" "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST" bash -s <<REMOTE
+          set -euo pipefail
+          export NODE_ENV=production
+          export PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+          export PLAYWRIGHT_BROWSERS_PATH=$browsers_path
+          mkdir -p "\$PLAYWRIGHT_BROWSERS_PATH"
+
+          cd $runner_path
+          echo "Installing runner production dependencies..."
+          npm ci --omit=dev
+
+          echo "Ensuring Playwright Chromium is installed..."
+          npx playwright install chromium
+
+          echo "Restarting scraper-portal service..."
+          $restart_command
+          echo "Deploy complete."
+          REMOTE
