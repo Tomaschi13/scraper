@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 "use strict";
 
+const crypto = require("node:crypto");
+const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const process = require("node:process");
@@ -40,43 +42,241 @@ const STEALTH_EXTRA_HEADERS = {
   "Sec-CH-UA-Platform": "\"macOS\""
 };
 
+// In-house stealth payload. Mirrors the evasions from
+// puppeteer-extra-plugin-stealth without the plugin's chrome.tabs-breaking
+// hooks. Runs before every page script via context.addInitScript.
 const STEALTH_INIT_SCRIPT = `
-  try {
-    Object.defineProperty(Object.getPrototypeOf(navigator), 'webdriver', { get: () => undefined });
-  } catch (_err) {}
-  try {
-    Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-  } catch (_err) {}
-  try {
-    Object.defineProperty(navigator, 'plugins', {
-      get: () => [
-        { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }
-      ]
+  (function () {
+    // Only run on real web pages. chrome-extension:// and devtools:// contexts
+    // must be left untouched — patching Function.prototype.toString or chrome.*
+    // there breaks the extension's bridge page and chrome.tabs messaging.
+    try {
+      const proto = location.protocol;
+      if (proto === 'chrome-extension:' || proto === 'devtools:' || proto === 'chrome:' || proto === 'about:') {
+        return;
+      }
+    } catch (_err) { /* no location — bail */ return; }
+
+    // Make an overridden function look native when inspected via toString().
+    // CF and similar bot checks compare fn.toString() to a native-code string.
+    const nativeToString = Function.prototype.toString;
+    const toStringMap = new WeakMap();
+    Function.prototype.toString = new Proxy(nativeToString, {
+      apply(target, thisArg, args) {
+        if (toStringMap.has(thisArg)) {
+          return toStringMap.get(thisArg);
+        }
+        return target.apply(thisArg, args);
+      }
     });
-  } catch (_err) {}
-  try {
-    window.chrome = window.chrome || { runtime: {}, loadTimes: function () {}, csi: function () {}, app: {} };
-  } catch (_err) {}
-  try {
-    const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
-    if (originalQuery) {
-      window.navigator.permissions.query = (parameters) => (
-        parameters && parameters.name === 'notifications'
-          ? Promise.resolve({ state: Notification.permission })
-          : originalQuery.call(window.navigator.permissions, parameters)
-      );
-    }
-  } catch (_err) {}
-  try {
-    const getParameter = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function (parameter) {
-      if (parameter === 37445) return 'Intel Inc.';
-      if (parameter === 37446) return 'Intel Iris OpenGL Engine';
-      return getParameter.call(this, parameter);
+    const markNative = (fn, name) => {
+      toStringMap.set(fn, 'function ' + name + '() { [native code] }');
+      return fn;
     };
-  } catch (_err) {}
+
+    // navigator.webdriver — delete from prototype so 'webdriver' in navigator is false.
+    try {
+      delete Object.getPrototypeOf(navigator).webdriver;
+    } catch (_err) {}
+    try {
+      Object.defineProperty(Navigator.prototype, 'webdriver', { get: () => undefined, configurable: true });
+    } catch (_err) {}
+
+    // navigator.languages
+    try {
+      Object.defineProperty(Navigator.prototype, 'languages', { get: () => ['en-US', 'en'], configurable: true });
+    } catch (_err) {}
+
+    // navigator.hardwareConcurrency / deviceMemory — stable, plausible values.
+    try {
+      Object.defineProperty(Navigator.prototype, 'hardwareConcurrency', { get: () => 8, configurable: true });
+    } catch (_err) {}
+    try {
+      Object.defineProperty(Navigator.prototype, 'deviceMemory', { get: () => 8, configurable: true });
+    } catch (_err) {}
+
+    // navigator.plugins + mimeTypes — mimic a real Chrome's PDF set (3 plugins, 2 mimeTypes).
+    try {
+      const mimePdf = Object.create(MimeType.prototype);
+      Object.defineProperties(mimePdf, {
+        type: { value: 'application/pdf' },
+        suffixes: { value: 'pdf' },
+        description: { value: 'Portable Document Format' }
+      });
+      const mimeOctet = Object.create(MimeType.prototype);
+      Object.defineProperties(mimeOctet, {
+        type: { value: 'text/pdf' },
+        suffixes: { value: 'pdf' },
+        description: { value: 'Portable Document Format' }
+      });
+      const buildPlugin = (name, desc) => {
+        const p = Object.create(Plugin.prototype);
+        Object.defineProperties(p, {
+          name: { value: name },
+          filename: { value: 'internal-pdf-viewer' },
+          description: { value: desc },
+          length: { value: 1 },
+          0: { value: mimePdf }
+        });
+        return p;
+      };
+      const plugins = [
+        buildPlugin('PDF Viewer', 'Portable Document Format'),
+        buildPlugin('Chrome PDF Viewer', 'Portable Document Format'),
+        buildPlugin('Chromium PDF Viewer', 'Portable Document Format'),
+        buildPlugin('Microsoft Edge PDF Viewer', 'Portable Document Format'),
+        buildPlugin('WebKit built-in PDF', 'Portable Document Format')
+      ];
+      Object.defineProperty(plugins, 'refresh', { value: () => {} });
+      Object.setPrototypeOf(plugins, PluginArray.prototype);
+      Object.defineProperty(Navigator.prototype, 'plugins', { get: () => plugins, configurable: true });
+
+      const mimeTypes = [mimePdf, mimeOctet];
+      Object.setPrototypeOf(mimeTypes, MimeTypeArray.prototype);
+      Object.defineProperty(Navigator.prototype, 'mimeTypes', { get: () => mimeTypes, configurable: true });
+    } catch (_err) {}
+
+    // window.chrome — populate the fields real Chrome has. Bot-detection JS
+    // frequently checks chrome.runtime, chrome.csi, chrome.loadTimes.
+    try {
+      if (!window.chrome) {
+        Object.defineProperty(window, 'chrome', { value: {}, writable: true, configurable: true });
+      }
+      const chromeObj = window.chrome;
+      chromeObj.app = chromeObj.app || {
+        isInstalled: false,
+        InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+        RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' }
+      };
+      chromeObj.runtime = chromeObj.runtime || {
+        OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
+        OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+        PlatformArch: { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+        PlatformNaclArch: { ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+        PlatformOs: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
+        RequestUpdateCheckStatus: { NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' }
+      };
+      if (!chromeObj.csi) {
+        chromeObj.csi = markNative(function csi() {
+          return { onloadT: Date.now(), startE: Date.now(), pageT: 1234, tran: 15 };
+        }, 'csi');
+      }
+      if (!chromeObj.loadTimes) {
+        chromeObj.loadTimes = markNative(function loadTimes() {
+          return {
+            requestTime: Date.now() / 1000,
+            startLoadTime: Date.now() / 1000,
+            commitLoadTime: Date.now() / 1000,
+            finishDocumentLoadTime: Date.now() / 1000,
+            finishLoadTime: Date.now() / 1000,
+            firstPaintTime: Date.now() / 1000,
+            firstPaintAfterLoadTime: 0,
+            navigationType: 'Other',
+            wasFetchedViaSpdy: true,
+            wasNpnNegotiated: true,
+            npnNegotiatedProtocol: 'h2',
+            wasAlternateProtocolAvailable: false,
+            connectionInfo: 'h2'
+          };
+        }, 'loadTimes');
+      }
+    } catch (_err) {}
+
+    // Notifications permissions query parity.
+    try {
+      const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
+      if (originalQuery) {
+        const patched = function query(parameters) {
+          if (parameters && parameters.name === 'notifications') {
+            return Promise.resolve({ state: Notification.permission, onchange: null });
+          }
+          return originalQuery.call(window.navigator.permissions, parameters);
+        };
+        markNative(patched, 'query');
+        window.navigator.permissions.query = patched;
+      }
+    } catch (_err) {}
+
+    // WebGL vendor/renderer — spoof for both GL1 and GL2 contexts.
+    try {
+      const UNMASKED_VENDOR_WEBGL = 37445;
+      const UNMASKED_RENDERER_WEBGL = 37446;
+      const patchGetParameter = (proto) => {
+        if (!proto || !proto.getParameter) return;
+        const original = proto.getParameter;
+        const patched = function getParameter(parameter) {
+          if (parameter === UNMASKED_VENDOR_WEBGL) return 'Intel Inc.';
+          if (parameter === UNMASKED_RENDERER_WEBGL) return 'Intel Iris OpenGL Engine';
+          return original.call(this, parameter);
+        };
+        markNative(patched, 'getParameter');
+        proto.getParameter = patched;
+      };
+      if (typeof WebGLRenderingContext !== 'undefined') patchGetParameter(WebGLRenderingContext.prototype);
+      if (typeof WebGL2RenderingContext !== 'undefined') patchGetParameter(WebGL2RenderingContext.prototype);
+    } catch (_err) {}
+
+    // Battery API — return a sane, full-charge-ish reading.
+    try {
+      if (navigator.getBattery) {
+        const batt = { charging: true, chargingTime: 0, dischargingTime: Infinity, level: 1, onchargingchange: null, onchargingtimechange: null, ondischargingtimechange: null, onlevelchange: null, addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => true };
+        const patched = function getBattery() { return Promise.resolve(batt); };
+        markNative(patched, 'getBattery');
+        Navigator.prototype.getBattery = patched;
+      }
+    } catch (_err) {}
+
+    // navigator.connection — real Chrome always has one.
+    try {
+      if (!navigator.connection || navigator.connection.rtt === 0) {
+        const connection = {
+          effectiveType: '4g',
+          rtt: 50,
+          downlink: 10,
+          saveData: false,
+          type: 'wifi',
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          dispatchEvent: () => true
+        };
+        Object.defineProperty(Navigator.prototype, 'connection', { get: () => connection, configurable: true });
+      }
+    } catch (_err) {}
+
+    // MediaCodecs — make canPlayType return the same strings real Chrome does.
+    try {
+      if (typeof HTMLMediaElement !== 'undefined') {
+        const original = HTMLMediaElement.prototype.canPlayType;
+        const patched = function canPlayType(type) {
+          if (!type) return '';
+          const normalized = String(type).toLowerCase();
+          if (normalized.includes('video/mp4')) return 'probably';
+          if (normalized.includes('video/ogg')) return 'probably';
+          if (normalized.includes('video/webm')) return 'probably';
+          if (normalized.includes('audio/mpeg')) return 'probably';
+          return original.call(this, type);
+        };
+        markNative(patched, 'canPlayType');
+        HTMLMediaElement.prototype.canPlayType = patched;
+      }
+    } catch (_err) {}
+
+    // iframe.contentWindow.chrome parity — ensure sub-frames also look real.
+    try {
+      const getContentWindow = Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype, 'contentWindow');
+      if (getContentWindow && getContentWindow.get) {
+        const originalGet = getContentWindow.get;
+        Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+          configurable: true,
+          get: function () {
+            const w = originalGet.call(this);
+            try { if (w && !w.chrome) Object.defineProperty(w, 'chrome', { value: window.chrome }); } catch (_e) {}
+            return w;
+          }
+        });
+      }
+    } catch (_err) {}
+  })();
 `;
 
 function loadChromium() {
@@ -303,6 +503,33 @@ function describeProxy(proxy) {
   }
 }
 
+function computeUnpackedExtensionId(extensionPath) {
+  const normalized = path.resolve(extensionPath);
+  const hash = crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 32);
+  return hash.replace(/[0-9a-f]/g, (c) => String.fromCharCode("a".charCodeAt(0) + parseInt(c, 16)));
+}
+
+function seedExtensionPreferences(userDataDir, extensionPath) {
+  const extensionId = computeUnpackedExtensionId(extensionPath);
+  const defaultDir = path.join(userDataDir, "Default");
+  fs.mkdirSync(defaultDir, { recursive: true });
+  const prefsPath = path.join(defaultDir, "Preferences");
+  let prefs = {};
+  try {
+    prefs = JSON.parse(fs.readFileSync(prefsPath, "utf8"));
+  } catch (_error) {
+    prefs = {};
+  }
+  prefs.extensions = prefs.extensions || {};
+  prefs.extensions.ui = prefs.extensions.ui || {};
+  prefs.extensions.ui.developer_mode = true;
+  prefs.extensions.settings = prefs.extensions.settings || {};
+  prefs.extensions.settings[extensionId] = prefs.extensions.settings[extensionId] || {};
+  prefs.extensions.settings[extensionId].user_scripts_allowed = true;
+  fs.writeFileSync(prefsPath, JSON.stringify(prefs));
+  return extensionId;
+}
+
 function validateConfig(config) {
   const missing = [];
 
@@ -524,6 +751,9 @@ async function run() {
 
     console.log(`Upstream proxy: ${describeProxy(config.proxy)}`);  // eslint-disable-line no-console
 
+    const seededExtensionId = seedExtensionPreferences(config.userDataDir, config.extensionPath);
+    console.log(`Seeded userScripts allow-list for extension ${seededExtensionId}.`);  // eslint-disable-line no-console
+
     context = await browserChromium.launchPersistentContext(config.userDataDir, {
       channel: config.browserChannel,
       headless: config.headless,
@@ -562,8 +792,12 @@ async function run() {
     const resolvedStartUrl = resolveRobotStartUrl(config, refreshResult);
     if (resolvedStartUrl) {
       console.log(`Priming start URL ${resolvedStartUrl} before starting the run.`);  // eslint-disable-line no-console
-      const warmedPage = await warmRobotStartUrl(context, resolvedStartUrl);
-      console.log(`Start URL is runnable at ${warmedPage.pageUrl}.`);  // eslint-disable-line no-console
+      try {
+        const warmedPage = await warmRobotStartUrl(context, resolvedStartUrl);
+        console.log(`Start URL is runnable at ${warmedPage.pageUrl}.`);  // eslint-disable-line no-console
+      } catch (error) {
+        console.log(`Start URL warmup did not clear in time: ${error?.message || error}. Handing off to the in-run challenge handler.`);  // eslint-disable-line no-console
+      }
     }
 
     const startResponse = await callBridge(bridgePage, "startRun", buildStartPayload(config));
@@ -617,7 +851,9 @@ module.exports = {
   buildConfig,
   buildProxyConfig,
   buildStartPayload,
+  computeUnpackedExtensionId,
   describeProxy,
+  seedExtensionPreferences,
   getRunFromState,
   resolveRobotStartUrl,
   waitForRunnablePage,

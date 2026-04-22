@@ -77,9 +77,11 @@ const runLifecycleHelpers = (() => {
     const challengeUrlPattern = /\/cdn-cgi\/(challenge-platform|l\/chk_captcha)\b/;
     const cloudflareTitlePattern = /(attention required|just a moment|please wait|verify you are human|security check)/;
 
+    const standaloneChallengeTitlePattern = /^just a moment\.*$/i;
     const looksLikeCloudflareChallenge = challengeUrlPattern.test(normalizedUrl)
       || (normalizedTitle.includes("cloudflare") && cloudflareTitlePattern.test(normalizedTitle))
-      || (/^just a moment/i.test(normalizedTitle) && normalizedUrl.includes("/cdn-cgi/"));
+      || (/^just a moment/i.test(normalizedTitle) && normalizedUrl.includes("/cdn-cgi/"))
+      || standaloneChallengeTitlePattern.test(normalizedTitle);
 
     if (!looksLikeCloudflareChallenge) {
       return null;

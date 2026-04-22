@@ -1069,12 +1069,23 @@ async function startRun(payload) {
   const runSource = payload.runSource === RUN_SOURCE.portalServer
     ? RUN_SOURCE.portalServer
     : RUN_SOURCE.localExtension;
+  const isServerRun = runSource === RUN_SOURCE.portalServer;
 
-  const startUrl = normalizeUrl(payload.url || draft.url || localRobot.url);
+  // Server runs must use the authoritative robot record from the portal DB,
+  // never the extension-local IDE draft (which can be stale or belong to a
+  // different robot the operator last edited).
+  const startUrl = normalizeUrl(
+    payload.url || (isServerRun ? localRobot.url : (draft.url || localRobot.url))
+  );
   const code = typeof payload.code === "string" && payload.code.trim()
     ? payload.code
-    : (draft.code || localRobot.code);
-  const robotName = (payload.name || draft.name || localRobot.name || "Untitled Robot").trim();
+    : (isServerRun ? localRobot.code : (draft.code || localRobot.code));
+  const robotName = (
+    payload.name
+      || (isServerRun ? localRobot.name : draft.name)
+      || localRobot.name
+      || "Untitled Robot"
+  ).trim();
 
   const run = hydrateRun({
     id: createId("run"),
@@ -1234,17 +1245,73 @@ async function onRuntimeReady(tab, pageUrl) {
   });
 
   if (blockedPageError) {
+    // Multiple domReady events can fire for a single page load; only count a
+    // new attempt once the prior reload has fired and the next domReady comes.
+    if (run.challengeReloadTimer) {
+      schedulePersist();
+      broadcastState();
+      return;
+    }
+    run.challengeAttempts = (run.challengeAttempts || 0) + 1;
+    if (run.challengeAttempts > CHALLENGE_MAX_ATTEMPTS) {
+      appendLog(
+        run,
+        `${blockedPageError} Giving up after ${CHALLENGE_MAX_ATTEMPTS} attempts.`,
+        "ERROR"
+      );
+      await finishRun(run, RUN_STATUS.failed);
+      return;
+    }
     appendLog(
       run,
-      `${blockedPageError} Waiting for the real page before executing step ${run.currentStep.step}.`,
+      `${blockedPageError} Waiting for the real page before executing step ${run.currentStep.step} (attempt ${run.challengeAttempts}/${CHALLENGE_MAX_ATTEMPTS}).`,
       "WARN"
     );
     schedulePersist();
     broadcastState();
+    scheduleChallengeReload(run, tab.id);
     return;
   }
 
+  run.challengeAttempts = 0;
   await executeCurrentStep(run);
+}
+
+const CHALLENGE_RELOAD_DELAY_MS = 15_000;
+const CHALLENGE_MAX_ATTEMPTS = 5;
+
+function scheduleChallengeReload(run, tabId) {
+  if (!run || run.challengeReloadTimer) {
+    return;
+  }
+  run.challengeReloadTimer = setTimeout(async () => {
+    run.challengeReloadTimer = null;
+    if (!isRunningRun(run)) {
+      return;
+    }
+    // If CF is mid-redirect (the URL has a __cf_chl_rt_tk token) let the
+    // in-flight challenge finish rather than interrupt it with a reload.
+    let currentUrl = "";
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      currentUrl = tab?.url || "";
+    } catch (_error) { /* tab gone */ }
+    if (currentUrl.includes("__cf_chl_rt_tk=")) {
+      appendLog(run, "Cloudflare challenge is redirecting — waiting another cycle.", "DEBUG");
+      schedulePersist();
+      broadcastState();
+      scheduleChallengeReload(run, tabId);
+      return;
+    }
+    try {
+      await chrome.tabs.reload(tabId, { bypassCache: false });
+      appendLog(run, `Reloaded tab ${tabId} to re-check Cloudflare challenge.`, "DEBUG");
+      schedulePersist();
+      broadcastState();
+    } catch (error) {
+      appendLog(run, `Failed to reload tab ${tabId}: ${error?.message || error}`, "WARN");
+    }
+  }, CHALLENGE_RELOAD_DELAY_MS);
 }
 
 function logFromTab(tabId, message, level = "DEBUG") {

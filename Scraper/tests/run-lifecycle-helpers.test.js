@@ -138,3 +138,18 @@ test("getBlockedPageError detects Cloudflare challenge titles and URLs", () => {
     pageUrl: "https://www.senukai.lt/c/telefonai-plansetiniai-kompiuteriai/mobilieji-telefonai/5nt"
   }), null);
 });
+
+test("getBlockedPageError detects in-place 'Just a moment...' challenge on real URL", () => {
+  const result = getBlockedPageError({
+    pageTitle: "Just a moment...",
+    pageUrl: "https://www.senukai.lt/c/telefonai-plansetiniai-kompiuteriai/mobilieji-telefonai/5nt"
+  });
+  assert.match(result, /Cloudflare challenge page/);
+});
+
+test("getBlockedPageError does not false-positive on titles that merely mention 'just a moment'", () => {
+  assert.equal(getBlockedPageError({
+    pageTitle: "Just a moment of your time: our story | Senukai",
+    pageUrl: "https://www.senukai.lt/about"
+  }), null);
+});
