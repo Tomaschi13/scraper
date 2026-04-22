@@ -34,7 +34,7 @@ function makeServicesSpy() {
   };
 }
 
-const sender = { tab: { id: 42, url: "https://example.com/page" } };
+const sender = { tab: { id: 42, url: "https://example.com/page", title: "Example Page" } };
 
 test("isLegacyPayload detects single method objects and method-bearing arrays", () => {
   assert.equal(router.isLegacyPayload({ method: "next", url: "x" }), true);
@@ -139,10 +139,10 @@ test("dispatch emitDbg forwards to logFromTab with the supplied level", async ()
   assert.deepEqual(spy.calls[0], { name: "logFromTab", args: [42, "hello", "WARN"] });
 });
 
-test("dispatch done routes to completeStep with the sender tab URL", async () => {
+test("dispatch done routes to completeStep with the sender tab URL and title", async () => {
   const spy = makeServicesSpy();
   await router.dispatchLegacyMethod({ method: "done" }, spy.services, sender);
-  assert.deepEqual(spy.calls[0], { name: "completeStep", args: [42, "https://example.com/page"] });
+  assert.deepEqual(spy.calls[0], { name: "completeStep", args: [42, "https://example.com/page", "Example Page"] });
 });
 
 test("dispatch domReady routes to onRuntimeReady with tab + pageUrl", async () => {

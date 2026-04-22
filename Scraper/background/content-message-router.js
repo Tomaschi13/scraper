@@ -94,7 +94,7 @@ const contentMessageRouter = (() => {
         return { ok: true };
 
       case "done":
-        await services.completeStep(tabId, sender?.tab?.url || "");
+        await services.completeStep(tabId, sender?.tab?.url || "", sender?.tab?.title || "");
         return { ok: true };
 
       case "setRetries": {

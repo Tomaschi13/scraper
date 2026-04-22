@@ -25,7 +25,10 @@ const {
 
 const {
   isRunningRun,
-  shouldProcessExecutionResult
+  shouldProcessExecutionResult,
+  createStepOutputCheckpoint,
+  rollbackStepOutput,
+  getBlockedPageError
 } = globalThis.ScraperRunLifecycleHelpers;
 
 const {
@@ -888,7 +891,8 @@ function hydrateRun(run) {
     code: typeof run.code === "string" ? run.code : DEFAULT_SCRIPT,
     tabId: Number.isInteger(run.tabId) ? run.tabId : null,
     updatedAt: run.updatedAt || new Date().toISOString(),
-    executionToken: null
+    executionToken: null,
+    currentStepOutputCheckpoint: null
   };
 }
 
@@ -1207,6 +1211,7 @@ async function onRuntimeReady(tab, pageUrl) {
     return;
   }
 
+  const liveTab = await chrome.tabs.get(tab.id).catch(() => tab);
   const run = findRunByTabId(tab.id);
 
   if (!run || run.status !== RUN_STATUS.running || !run.currentStep) {
@@ -1214,10 +1219,26 @@ async function onRuntimeReady(tab, pageUrl) {
     return;
   }
 
-  run.currentUrl = pageUrl || tab.url || run.currentUrl;
+  run.currentUrl = pageUrl || liveTab?.url || tab.url || run.currentUrl;
   updateSnapshot(run);
 
   if (!shouldExecuteRunOnRuntimeReady(run)) {
+    schedulePersist();
+    broadcastState();
+    return;
+  }
+
+  const blockedPageError = getBlockedPageError({
+    pageTitle: liveTab?.title || tab.title || "",
+    pageUrl: run.currentUrl
+  });
+
+  if (blockedPageError) {
+    appendLog(
+      run,
+      `${blockedPageError} Waiting for the real page before executing step ${run.currentStep.step}.`,
+      "WARN"
+    );
     schedulePersist();
     broadcastState();
     return;
@@ -1290,15 +1311,26 @@ function emitRowsFromRuntime(tabId, tableName, rows) {
   return true;
 }
 
-async function completeStep(tabId, pageUrl) {
+async function completeStep(tabId, pageUrl, pageTitle = "") {
   const run = findRunByTabId(tabId);
 
   if (!run || run.status !== RUN_STATUS.running || !run.currentStep) {
     return;
   }
 
+  const blockedPageError = getBlockedPageError({
+    pageTitle,
+    pageUrl: pageUrl || run.currentUrl || run.startUrl
+  });
+
+  if (blockedPageError) {
+    await failCurrentStep(tabId, blockedPageError, { fatal: true });
+    return;
+  }
+
   clearRunTimer(run.id);
   run.executionToken = null;
+  run.currentStepOutputCheckpoint = null;
   run.currentUrl = pageUrl || run.currentUrl;
   run.phase = RUN_STATUS.idle;
   run.currentStep = null;
@@ -1309,7 +1341,7 @@ async function completeStep(tabId, pageUrl) {
   await dispatchNextStep(run);
 }
 
-async function failCurrentStep(tabId, errorMessage) {
+async function failCurrentStep(tabId, errorMessage, options = {}) {
   const run = findRunByTabId(tabId);
 
   if (!run || run.status !== RUN_STATUS.running || !run.currentStep) {
@@ -1318,7 +1350,7 @@ async function failCurrentStep(tabId, errorMessage) {
 
   clearRunTimer(run.id);
   appendLog(run, errorMessage, "ERROR");
-  await retryOrFailRun(run, run.currentStep);
+  await retryOrFailRun(run, run.currentStep, options);
 }
 
 function clearRunQueue(tabId) {
@@ -1560,6 +1592,7 @@ async function dispatchNextStep(run) {
   }
 
   run.currentStep = nextStep;
+  run.currentStepOutputCheckpoint = createStepOutputCheckpoint(run);
   run.phase = nextStep.gofast ? "EXECUTING" : "AWAITING_DOM_READY";
   run.updatedAt = new Date().toISOString();
   appendLog(
@@ -1655,8 +1688,19 @@ async function executeCurrentStep(run) {
   }
 }
 
-async function retryOrFailRun(run, step) {
+async function retryOrFailRun(run, step, { fatal = false } = {}) {
   run.executionToken = null;
+  const rollback = rollbackStepOutput(run, run.currentStepOutputCheckpoint);
+  run.currentStepOutputCheckpoint = null;
+
+  if (rollback.removedRows > 0 || rollback.removedEmits > 0) {
+    appendLog(
+      run,
+      `Discarded ${rollback.removedRows} row(s) from ${rollback.removedEmits} emit(s) because step ${step?.step || "unknown"} failed.`,
+      "WARN"
+    );
+  }
+
   run.failures += 1;
   const nextAttempt = (step.retryCount || 0) + 1;
   const updatedStep = {
@@ -1667,13 +1711,19 @@ async function retryOrFailRun(run, step) {
   run.currentStep = null;
   run.phase = RUN_STATUS.idle;
 
-  if (nextAttempt < run.retries.maxStep && run.failures < run.retries.maxRun) {
+  if (!fatal && nextAttempt < run.retries.maxStep && run.failures < run.retries.maxRun) {
     run.queue.push(updatedStep);
     appendLog(run, `Retrying step ${updatedStep.step}. Attempt ${nextAttempt}.`, "WARN");
     updateSnapshot(run);
     schedulePersist();
     broadcastState();
     await dispatchNextStep(run);
+    return;
+  }
+
+  if (fatal) {
+    appendLog(run, `Step ${updatedStep.step} failed without retry. Marking run as failed.`, "ERROR");
+    await finishRun(run, RUN_STATUS.failed);
     return;
   }
 
@@ -1684,6 +1734,7 @@ async function retryOrFailRun(run, step) {
 async function finishRun(run, status) {
   clearRunTimer(run.id);
   run.executionToken = null;
+  run.currentStepOutputCheckpoint = null;
   run.status = status;
   run.phase = RUN_STATUS.idle;
   run.currentStep = null;

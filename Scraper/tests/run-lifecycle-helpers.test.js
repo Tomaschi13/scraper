@@ -5,7 +5,10 @@ const assert = require("node:assert/strict");
 
 const {
   isRunningRun,
-  shouldProcessExecutionResult
+  shouldProcessExecutionResult,
+  createStepOutputCheckpoint,
+  rollbackStepOutput,
+  getBlockedPageError
 } = require("../background/run-lifecycle-helpers.js");
 
 test("isRunningRun returns true only for active runs", () => {
@@ -63,4 +66,75 @@ test("shouldProcessExecutionResult rejects non-running runs even when the token 
   };
 
   assert.equal(shouldProcessExecutionResult(runtimeState, run, "exec_1"), false);
+});
+
+test("createStepOutputCheckpoint snapshots current table lengths and counters", () => {
+  const checkpoint = createStepOutputCheckpoint({
+    outputTables: {
+      pages: [{ id: 1 }, { id: 2 }],
+      products: [{ sku: "A" }]
+    },
+    emits: 3,
+    rows: 7
+  });
+
+  assert.deepEqual(checkpoint, {
+    tableLengths: {
+      pages: 2,
+      products: 1
+    },
+    emits: 3,
+    rows: 7
+  });
+});
+
+test("rollbackStepOutput removes rows and tables added by a failed step", () => {
+  const run = {
+    outputTables: {
+      pages: [{ id: 1 }, { id: 2 }, { id: 3 }],
+      products: [{ sku: "A" }],
+      transient: [{ temp: true }]
+    },
+    emits: 5,
+    rows: 9
+  };
+
+  const rollback = rollbackStepOutput(run, {
+    tableLengths: {
+      pages: 2,
+      products: 1
+    },
+    emits: 3,
+    rows: 7
+  });
+
+  assert.deepEqual(run.outputTables, {
+    pages: [{ id: 1 }, { id: 2 }],
+    products: [{ sku: "A" }]
+  });
+  assert.equal(run.emits, 3);
+  assert.equal(run.rows, 7);
+  assert.deepEqual(rollback, {
+    removedEmits: 2,
+    removedRows: 2
+  });
+});
+
+test("getBlockedPageError detects Cloudflare challenge titles and URLs", () => {
+  const titleOnly = getBlockedPageError({
+    pageTitle: "Attention Required! | Cloudflare",
+    pageUrl: "https://www.senukai.lt/c/telefonai-plansetiniai-kompiuteriai/mobilieji-telefonai/5nt"
+  });
+  assert.match(titleOnly, /Cloudflare challenge page/);
+
+  const urlOnly = getBlockedPageError({
+    pageTitle: "Just a moment...",
+    pageUrl: "https://www.example.com/cdn-cgi/challenge-platform/h/b/orchestrate/jsch/v1"
+  });
+  assert.match(urlOnly, /Cloudflare challenge page/);
+
+  assert.equal(getBlockedPageError({
+    pageTitle: "Mobile Phones",
+    pageUrl: "https://www.senukai.lt/c/telefonai-plansetiniai-kompiuteriai/mobilieji-telefonai/5nt"
+  }), null);
 });
