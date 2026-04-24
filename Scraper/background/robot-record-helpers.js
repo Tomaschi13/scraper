@@ -70,6 +70,7 @@ const robotRecordHelpers = (() => {
     const list = Array.isArray(robots) ? robots : [];
     const existingIndex = list.findIndex((robot) => robot.id === portalRobot?.id);
     const existingRobot = existingIndex === -1 ? null : list[existingIndex];
+    const preMergeSnapshot = existingRobot ? { ...existingRobot, config: cloneConfig(existingRobot.config) } : null;
     const nextRobot = normalizeRobotFromPortal(portalRobot, {
       defaultConfig,
       defaultScript,
@@ -92,15 +93,18 @@ const robotRecordHelpers = (() => {
 
     let nextDraft = draft;
     if (syncDraft && draft?.selectedRobotId === resolvedRobot.id && !draftMatchesRobot(draft, resolvedRobot)) {
-      nextDraft = {
-        selectedRobotId: resolvedRobot.id,
-        name: resolvedRobot.name,
-        url: resolvedRobot.url,
-        tag: resolvedRobot.tag,
-        code: resolvedRobot.code,
-        config: cloneConfig(resolvedRobot.config)
-      };
-      changed = true;
+      const draftIsClean = preMergeSnapshot ? draftMatchesRobot(draft, preMergeSnapshot) : false;
+      if (draftIsClean) {
+        nextDraft = {
+          selectedRobotId: resolvedRobot.id,
+          name: resolvedRobot.name,
+          url: resolvedRobot.url,
+          tag: resolvedRobot.tag,
+          code: resolvedRobot.code,
+          config: cloneConfig(resolvedRobot.config)
+        };
+        changed = true;
+      }
     }
 
     return {

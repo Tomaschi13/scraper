@@ -133,3 +133,47 @@ test("applyPortalRobotUpdate keeps unsaved draft code when the refresh is cache-
   assert.equal(result.draft.url, "https://old.example.com");
   assert.equal(result.changed, true);
 });
+
+test("applyPortalRobotUpdate preserves a dirty draft even when syncDraft is true", () => {
+  const robots = [{
+    id: "robot-1",
+    name: "Robot 1",
+    url: "https://old.example.com",
+    tag: "phones",
+    code: "old();",
+    config: { ...DEFAULT_CONFIG },
+    createdAt: "2026-04-20T08:30:00.000Z",
+    updatedAt: "2026-04-20T08:30:00.000Z"
+  }];
+  const draft = {
+    selectedRobotId: "robot-1",
+    name: "Robot 1",
+    url: "https://old.example.com",
+    tag: "phones",
+    code: "userEditedButNotSaved();",
+    config: { ...DEFAULT_CONFIG }
+  };
+
+  const result = applyPortalRobotUpdate({
+    robots,
+    draft,
+    portalRobot: {
+      id: "robot-1",
+      name: "Robot 1",
+      url: "https://fresh.example.com",
+      tag: "phones",
+      code: "freshFromPortal();",
+      config: { skipVisited: true },
+      createdAt: "2026-04-20T08:30:00.000Z",
+      updatedAt: "2026-04-21T08:30:00.000Z"
+    },
+    defaultConfig: DEFAULT_CONFIG,
+    defaultScript: DEFAULT_SCRIPT,
+    syncDraft: true
+  });
+
+  assert.equal(result.robot.code, "freshFromPortal();");
+  assert.equal(result.draft.code, "userEditedButNotSaved();");
+  assert.equal(result.draft.url, "https://old.example.com");
+  assert.equal(result.changed, true);
+});

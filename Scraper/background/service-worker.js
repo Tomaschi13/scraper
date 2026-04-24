@@ -745,7 +745,7 @@ function ensureDraftConsistency() {
       return false;
     }
 
-    draft = robots[0] ? createDraftFromRobot(robots[0]) : createEmptyDraft();
+    draft = { ...draft, selectedRobotId: "" };
     return true;
   }
 
@@ -755,17 +755,7 @@ function ensureDraftConsistency() {
     config: isObject(draft.config) ? draft.config : clone(DEFAULT_CONFIG)
   };
 
-  if (!robots.length) {
-    return false;
-  }
-
-  const hasUnsavedContent = Boolean(draft.name || draft.url || draft.tag || draft.code);
-  if (hasUnsavedContent) {
-    return false;
-  }
-
-  draft = createDraftFromRobot(robots[0]);
-  return true;
+  return false;
 }
 
 function buildUiState() {
@@ -944,7 +934,7 @@ async function purgeRobotState(robotId) {
   }
 
   if (draft?.selectedRobotId === robotId) {
-    draft = robots[0] ? createDraftFromRobot(robots[0]) : createEmptyDraft();
+    draft = { ...draft, selectedRobotId: "" };
     changed = true;
   }
 
