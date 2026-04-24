@@ -581,7 +581,7 @@ async function mergePortalRobotsIntoLocal(portalRobots) {
   return changed;
 }
 
-async function syncRobotFromPortal(robotId, { syncDraft = true } = {}) {
+async function syncRobotFromPortal(robotId, { forceDraftSync = false, syncDraft = true } = {}) {
   if (!robotId) {
     return { robot: null, changed: false };
   }
@@ -599,6 +599,7 @@ async function syncRobotFromPortal(robotId, { syncDraft = true } = {}) {
     portalRobot,
     defaultConfig: DEFAULT_CONFIG,
     defaultScript: DEFAULT_SCRIPT,
+    forceDraftSync,
     syncDraft
   });
 
@@ -626,14 +627,19 @@ async function handleMessage(message, sender) {
       }
       return { ok: true, state: buildUiState() };
     }
-    case "SAVE_DRAFT":
+    case "SAVE_DRAFT": {
+      const incomingDraft = message.draft || {};
       draft = {
         ...draft,
-        ...(message.draft || {})
+        ...incomingDraft,
+        selectedRobotId: typeof incomingDraft.selectedRobotId === "string"
+          ? incomingDraft.selectedRobotId
+          : (typeof incomingDraft.robotId === "string" ? incomingDraft.robotId : draft?.selectedRobotId || "")
       };
       schedulePersist();
       broadcastState();
       return { ok: true, draft };
+    }
     case "SAVE_ROBOT":
       return { ok: true, robot: await saveRobot(message.robot || {}) };
     case "LOAD_ROBOT":
@@ -1016,7 +1022,7 @@ async function loadRobot(robotId) {
 
   let refreshed;
   try {
-    refreshed = await syncRobotFromPortal(robotId, { syncDraft: true });
+    refreshed = await syncRobotFromPortal(robotId, { forceDraftSync: true, syncDraft: true });
   } catch (error) {
     throw new Error(`Could not load robot from the portal: ${error.message}`);
   }

@@ -177,3 +177,58 @@ test("applyPortalRobotUpdate preserves a dirty draft even when syncDraft is true
   assert.equal(result.draft.url, "https://old.example.com");
   assert.equal(result.changed, true);
 });
+
+test("applyPortalRobotUpdate force-syncs the draft for explicit robot loads", () => {
+  const robots = [{
+    id: "runner-smoke",
+    name: "Runner Smoke Test",
+    url: "https://runner.example.com",
+    tag: "smoke",
+    code: "runner();",
+    config: { ...DEFAULT_CONFIG },
+    createdAt: "2026-04-20T08:30:00.000Z",
+    updatedAt: "2026-04-20T08:30:00.000Z"
+  }, {
+    id: "senukai",
+    name: "Senukai",
+    url: "https://old.senukai.example.com",
+    tag: "phones",
+    code: "oldSenukai();",
+    config: { ...DEFAULT_CONFIG },
+    createdAt: "2026-04-20T08:30:00.000Z",
+    updatedAt: "2026-04-20T08:30:00.000Z"
+  }];
+  const draft = {
+    selectedRobotId: "runner-smoke",
+    name: "Senukai",
+    url: "https://www.senukai.lt/c/telefonai-plansetiniai-kompiuteriai/mobilieji-telefonai/5nt",
+    tag: "phones",
+    code: "userEditedSenukai();",
+    config: { ...DEFAULT_CONFIG }
+  };
+
+  const result = applyPortalRobotUpdate({
+    robots,
+    draft,
+    portalRobot: {
+      id: "senukai",
+      name: "Senukai",
+      url: "https://fresh.senukai.example.com",
+      tag: "phones",
+      code: "freshSenukai();",
+      config: { skipVisited: true },
+      createdAt: "2026-04-20T08:30:00.000Z",
+      updatedAt: "2026-04-21T08:30:00.000Z"
+    },
+    defaultConfig: DEFAULT_CONFIG,
+    defaultScript: DEFAULT_SCRIPT,
+    forceDraftSync: true,
+    syncDraft: true
+  });
+
+  assert.equal(result.draft.selectedRobotId, "senukai");
+  assert.equal(result.draft.name, "Senukai");
+  assert.equal(result.draft.url, "https://fresh.senukai.example.com");
+  assert.equal(result.draft.code, "freshSenukai();");
+  assert.equal(result.changed, true);
+});

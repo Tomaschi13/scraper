@@ -65,6 +65,7 @@ const robotRecordHelpers = (() => {
     portalRobot,
     defaultConfig = {},
     defaultScript = "",
+    forceDraftSync = false,
     syncDraft = false
   }) {
     const list = Array.isArray(robots) ? robots : [];
@@ -92,8 +93,9 @@ const robotRecordHelpers = (() => {
     }
 
     let nextDraft = draft;
-    if (syncDraft && draft?.selectedRobotId === resolvedRobot.id && !draftMatchesRobot(draft, resolvedRobot)) {
-      const draftIsClean = preMergeSnapshot ? draftMatchesRobot(draft, preMergeSnapshot) : false;
+    const shouldSyncDraft = syncDraft && (forceDraftSync || draft?.selectedRobotId === resolvedRobot.id);
+    if (shouldSyncDraft && !draftMatchesRobot(draft, resolvedRobot)) {
+      const draftIsClean = forceDraftSync || (preMergeSnapshot ? draftMatchesRobot(draft, preMergeSnapshot) : false);
       if (draftIsClean) {
         nextDraft = {
           selectedRobotId: resolvedRobot.id,

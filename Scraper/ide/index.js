@@ -1079,6 +1079,7 @@ function collectDraft() {
   return {
     id: robotId,
     robotId,
+    selectedRobotId: robotId,
     name: elements.robotNameInput.value.trim(),
     url: elements.urlInput.value.trim(),
     tag: elements.tagInput.value.trim(),
