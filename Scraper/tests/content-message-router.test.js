@@ -82,7 +82,7 @@ test("dispatch next preserves gofast and defaults missing fields", async () => {
   assert.deepEqual(spy.calls[0].args[1], [{ url: "https://foo/", step: "start", params: null, gofast: true }]);
 });
 
-test("dispatch handleLegacyPayload processes batched next array sequentially", async () => {
+test("dispatch handleLegacyPayload queues batched next arrays in one runtime call", async () => {
   const spy = makeServicesSpy();
   const responses = await router.handleLegacyPayload([
     { method: "next", url: "https://a/", step: "s1" },
@@ -91,9 +91,13 @@ test("dispatch handleLegacyPayload processes batched next array sequentially", a
   assert.equal(responses.length, 2);
   assert.equal(responses[0].ok, true);
   assert.equal(responses[1].ok, true);
-  assert.equal(spy.calls.length, 2);
-  assert.equal(spy.calls[0].args[1][0].url, "https://a/");
-  assert.equal(spy.calls[1].args[1][0].url, "https://b/");
+  assert.deepEqual(spy.calls, [{
+    name: "queueStepsFromRuntime",
+    args: [42, [
+      { url: "https://a/", step: "s1", params: null, gofast: false },
+      { url: "https://b/", step: "s2", params: null, gofast: false }
+    ]]
+  }]);
 });
 
 test("dispatch fork queues a single non-gofast step", async () => {

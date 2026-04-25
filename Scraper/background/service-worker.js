@@ -28,7 +28,9 @@ const {
   shouldProcessExecutionResult,
   createStepOutputCheckpoint,
   rollbackStepOutput,
-  getBlockedPageError
+  getBlockedPageError,
+  createLegacyQueueEntries,
+  isOpenUrlStep
 } = globalThis.ScraperRunLifecycleHelpers;
 
 const {
@@ -1260,7 +1262,7 @@ async function onRuntimeReady(tab, pageUrl) {
     }
     appendLog(
       run,
-      `${blockedPageError} Waiting for the real page before executing step ${run.currentStep.step} (attempt ${run.challengeAttempts}/${CHALLENGE_MAX_ATTEMPTS}).`,
+      `${blockedPageError} Waiting for the real page before executing step ${describeStep(run.currentStep)} (attempt ${run.challengeAttempts}/${CHALLENGE_MAX_ATTEMPTS}).`,
       "WARN"
     );
     schedulePersist();
@@ -1270,6 +1272,11 @@ async function onRuntimeReady(tab, pageUrl) {
   }
 
   run.challengeAttempts = 0;
+  if (isOpenUrlStep(run.currentStep)) {
+    await completeOpenUrlStep(run, run.currentUrl);
+    return;
+  }
+
   await executeCurrentStep(run);
 }
 
@@ -1624,6 +1631,8 @@ async function resolvePreviewTabId() {
 }
 
 function enqueueSteps(run, steps) {
+  let queuedCount = 0;
+
   for (const step of steps) {
     if (run.config.skipVisited && step.url && run.visitedMap[step.url]) {
       appendLog(run, `Skipping already-visited URL: ${step.url}`, "INFO");
@@ -1635,10 +1644,13 @@ function enqueueSteps(run, steps) {
       run.visitedUrls.push(step.url);
     }
 
-    run.queue.push(step);
+    for (const queueEntry of createLegacyQueueEntries(step, { createId })) {
+      run.queue.push(queueEntry);
+      queuedCount += 1;
+    }
   }
 
-  appendLog(run, `Queued ${steps.length} step(s). Queue size: ${run.queue.length}`, "DEBUG");
+  appendLog(run, `Queued ${queuedCount} step(s). Queue size: ${run.queue.length}`, "DEBUG");
   run.updatedAt = new Date().toISOString();
 }
 
@@ -1655,13 +1667,19 @@ async function dispatchNextStep(run) {
   }
 
   run.currentStep = nextStep;
-  run.currentStepOutputCheckpoint = createStepOutputCheckpoint(run);
+  run.currentStepOutputCheckpoint = isOpenUrlStep(nextStep)
+    ? null
+    : createStepOutputCheckpoint(run);
   run.phase = nextStep.gofast ? "EXECUTING" : "AWAITING_DOM_READY";
   run.updatedAt = new Date().toISOString();
   appendLog(
     run,
-    nextStep.gofast
+    isOpenUrlStep(nextStep)
+      ? `Opening URL ${nextStep.url}`
+      : nextStep.gofast
       ? `Executing fast step ${nextStep.step} against ${nextStep.url || run.currentUrl || run.startUrl}`
+      : !nextStep.url
+      ? `Executing step ${nextStep.step}`
       : `Navigating to ${nextStep.url} for step ${nextStep.step}`,
     "INFO"
   );
@@ -1704,6 +1722,20 @@ async function dispatchNextStep(run) {
   }
 }
 
+async function completeOpenUrlStep(run, pageUrl) {
+  clearRunTimer(run.id);
+  run.executionToken = null;
+  run.currentStepOutputCheckpoint = null;
+  run.currentUrl = pageUrl || run.currentUrl;
+  run.phase = RUN_STATUS.idle;
+  run.currentStep = null;
+  appendLog(run, "URL opened.", "INFO");
+  updateSnapshot(run);
+  schedulePersist();
+  broadcastState();
+  await dispatchNextStep(run);
+}
+
 async function executeCurrentStep(run) {
   if (!run?.currentStep || !run.tabId) {
     return;
@@ -1718,7 +1750,7 @@ async function executeCurrentStep(run) {
   broadcastState();
 
   const step = run.currentStep;
-  const ajaxUrl = step.gofast ? (step.url || "") : "";
+  const ajaxUrl = step.gofast ? (step.ajaxurl || step.url || "") : "";
 
   try {
     await ensureUserScriptWorldConfigured();
@@ -1759,7 +1791,7 @@ async function retryOrFailRun(run, step, { fatal = false } = {}) {
   if (rollback.removedRows > 0 || rollback.removedEmits > 0) {
     appendLog(
       run,
-      `Discarded ${rollback.removedRows} row(s) from ${rollback.removedEmits} emit(s) because step ${step?.step || "unknown"} failed.`,
+      `Discarded ${rollback.removedRows} row(s) from ${rollback.removedEmits} emit(s) because step ${describeStep(step)} failed.`,
       "WARN"
     );
   }
@@ -1776,7 +1808,7 @@ async function retryOrFailRun(run, step, { fatal = false } = {}) {
 
   if (!fatal && nextAttempt < run.retries.maxStep && run.failures < run.retries.maxRun) {
     run.queue.push(updatedStep);
-    appendLog(run, `Retrying step ${updatedStep.step}. Attempt ${nextAttempt}.`, "WARN");
+    appendLog(run, `Retrying step ${describeStep(updatedStep)}. Attempt ${nextAttempt}.`, "WARN");
     updateSnapshot(run);
     schedulePersist();
     broadcastState();
@@ -1785,12 +1817,12 @@ async function retryOrFailRun(run, step, { fatal = false } = {}) {
   }
 
   if (fatal) {
-    appendLog(run, `Step ${updatedStep.step} failed without retry. Marking run as failed.`, "ERROR");
+    appendLog(run, `Step ${describeStep(updatedStep)} failed without retry. Marking run as failed.`, "ERROR");
     await finishRun(run, RUN_STATUS.failed);
     return;
   }
 
-  appendLog(run, `Too many failures for step ${updatedStep.step}. Marking run as failed.`, "ERROR");
+  appendLog(run, `Too many failures for step ${describeStep(updatedStep)}. Marking run as failed.`, "ERROR");
   await finishRun(run, RUN_STATUS.failed);
 }
 
@@ -1850,6 +1882,14 @@ function appendLog(run, message, level = "INFO") {
   }
 }
 
+function describeStep(step) {
+  if (isOpenUrlStep(step)) {
+    return "openUrl";
+  }
+
+  return step?.step || "unknown";
+}
+
 function armRunTimer(run) {
   clearRunTimer(run.id);
   runTimers.set(run.id, setTimeout(() => {
@@ -1860,7 +1900,7 @@ function armRunTimer(run) {
         return;
       }
 
-      appendLog(liveRun, `Timed out waiting for step ${liveRun.currentStep.step}.`, "WARN");
+      appendLog(liveRun, `Timed out waiting for step ${describeStep(liveRun.currentStep)}.`, "WARN");
       await retryOrFailRun(liveRun, liveRun.currentStep);
     });
   }, run.retries.intervalMs));
@@ -1887,9 +1927,11 @@ function createStep(step) {
   return {
     id: createId("step"),
     url: step.url ? normalizeUrl(step.url) : "",
+    method: step.method || "",
     step: step.step || "start",
     params: step.params ?? null,
     gofast: Boolean(step.gofast),
+    ajaxurl: step.ajaxurl ? normalizeUrl(step.ajaxurl) : "",
     retryCount: Number.isFinite(Number(step.retryCount)) ? Number(step.retryCount) : 0
   };
 }
