@@ -7,6 +7,7 @@ const {
   isRunningRun,
   getPendingProxyOperationCount,
   hasPendingProxyOperations,
+  shouldRefreshProxyAfterStepFailure,
   incrementPendingProxyOperations,
   decrementPendingProxyOperations,
   trimOutputTables,
@@ -48,6 +49,23 @@ test("pending proxy operation count treats invalid values as zero", () => {
   assert.equal(getPendingProxyOperationCount({ pendingProxyOperations: "nope" }), 0);
   assert.equal(incrementPendingProxyOperations(null), 0);
   assert.equal(decrementPendingProxyOperations(null), 0);
+});
+
+test("shouldRefreshProxyAfterStepFailure only refreshes active proxies for retryable failures", () => {
+  const run = {
+    status: "RUNNING",
+    activeProxy: {
+      type: "portalTag",
+      tag: "resi"
+    }
+  };
+
+  assert.equal(shouldRefreshProxyAfterStepFailure(run, { willRetry: true }), true);
+  assert.equal(shouldRefreshProxyAfterStepFailure(run, { fatal: true, willRetry: true }), false);
+  assert.equal(shouldRefreshProxyAfterStepFailure(run, { willRetry: false }), false);
+  assert.equal(shouldRefreshProxyAfterStepFailure({ ...run, activeProxy: null }, { willRetry: true }), false);
+  assert.equal(shouldRefreshProxyAfterStepFailure({ ...run, status: "FAILED" }, { willRetry: true }), false);
+  assert.equal(shouldRefreshProxyAfterStepFailure(null, { willRetry: true }), false);
 });
 
 test("shouldProcessExecutionResult accepts only the live running run with a matching token", () => {

@@ -18,6 +18,13 @@ const runLifecycleHelpers = (() => {
     return getPendingProxyOperationCount(run) > 0;
   }
 
+  function shouldRefreshProxyAfterStepFailure(run, { fatal = false, willRetry = false } = {}) {
+    return isRunningRun(run)
+      && Boolean(run.activeProxy)
+      && !fatal
+      && Boolean(willRetry);
+  }
+
   function incrementPendingProxyOperations(run) {
     if (!run || typeof run !== "object") {
       return 0;
@@ -208,6 +215,7 @@ const runLifecycleHelpers = (() => {
     isRunningRun,
     getPendingProxyOperationCount,
     hasPendingProxyOperations,
+    shouldRefreshProxyAfterStepFailure,
     incrementPendingProxyOperations,
     decrementPendingProxyOperations,
     trimOutputTables,

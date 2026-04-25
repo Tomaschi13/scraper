@@ -31,6 +31,7 @@ const {
 const {
   isRunningRun,
   hasPendingProxyOperations,
+  shouldRefreshProxyAfterStepFailure,
   incrementPendingProxyOperations,
   decrementPendingProxyOperations,
   trimOutputTables,
@@ -1739,7 +1740,7 @@ function armProxyRotationTimer(run) {
   clearProxyRotationTimer(run.id);
   proxyRotationTimers.set(run.id, setTimeout(() => {
     void withReady(async () => {
-      await rotateRunProxy(run.id);
+      await rotateRunProxy(run.id, "scheduled");
     });
   }, AUTO_PROXY_ROTATE_INTERVAL_MS));
 }
@@ -1779,9 +1780,15 @@ function clearProxyRotationForTab(tabId) {
   return clearProxyRotationForRun(run);
 }
 
-async function rotateRunProxy(runId) {
+async function rotateRunProxy(runId, trigger = "scheduled") {
   const run = runtime.runs[runId];
   const source = clone(run?.activeProxy);
+  const label = trigger === "stepFailure"
+    ? "Proxy refresh after step failure"
+    : "Proxy auto-rotation";
+  const failureSuffix = trigger === "stepFailure"
+    ? "keeping the current proxy for this retry; scheduled proxy refresh remains active."
+    : "keeping the current proxy and retrying on the next interval.";
 
   if (!isRunningRun(run) || !source) {
     clearProxyRotationTimer(runId);
@@ -1794,18 +1801,27 @@ async function rotateRunProxy(runId) {
     } else if (source.type === "direct") {
       await rotateDirectProxy(run, source.proxy);
     } else {
-      appendLog(run, "Proxy auto-rotation disabled because the proxy source is unknown.", "WARN");
+      appendLog(run, `${label} disabled because the proxy source is unknown.`, "WARN");
       clearProxyRotationForRun(run);
       return;
     }
   } catch (_error) {
-    appendLog(run, "Proxy auto-rotation failed; keeping the current proxy and retrying on the next interval.", "WARN");
+    appendLog(run, `${label} failed; ${failureSuffix}`, "WARN");
   }
 
   const liveRun = runtime.runs[runId];
   if (isRunningRun(liveRun) && liveRun.activeProxy) {
     armProxyRotationTimer(liveRun);
   }
+}
+
+async function refreshProxyAfterFailedStep(run, step) {
+  if (!isRunningRun(run) || !run.activeProxy) {
+    return;
+  }
+
+  appendLog(run, `Refreshing proxy before retrying failed step ${describeStep(step)}.`, "WARN");
+  await rotateRunProxy(run.id, "stepFailure");
 }
 
 async function rotatePortalTagProxy(run, tag) {
@@ -2229,13 +2245,22 @@ async function retryOrFailRun(run, step, { fatal = false } = {}) {
   run.currentStep = null;
   run.phase = RUN_STATUS.idle;
 
-  if (!fatal && nextAttempt < run.retries.maxStep && run.failures < run.retries.maxRun) {
+  const willRetry = !fatal
+    && nextAttempt < run.retries.maxStep
+    && run.failures < run.retries.maxRun;
+
+  if (willRetry) {
     run.queue.push(updatedStep);
     appendLog(run, `Retrying step ${describeStep(updatedStep)}. Attempt ${nextAttempt}.`, "WARN");
     updateSnapshot(run);
     schedulePersist();
     schedulePortalResumePersist(run);
     broadcastState();
+
+    if (shouldRefreshProxyAfterStepFailure(run, { fatal, willRetry })) {
+      await refreshProxyAfterFailedStep(run, updatedStep);
+    }
+
     await dispatchNextStep(run);
     return;
   }
