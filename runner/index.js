@@ -18,6 +18,10 @@ const RUN_SOURCE = {
 const DEFAULT_START_URL_WARMUP_TIMEOUT_MS = 45_000;
 const DEFAULT_START_URL_WARMUP_POLL_INTERVAL_MS = 750;
 const DEFAULT_START_URL_WARMUP_RELOAD_AFTER_MS = 12_000;
+const SIGNAL_EXIT_CODES = {
+  SIGINT: 130,
+  SIGTERM: 143
+};
 
 const STEALTH_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const STEALTH_LOCALE = "en-US";
@@ -396,6 +400,111 @@ function emitRunnerEvent(event, payload = {}) {
   console.log(`${RUNNER_EVENT_PREFIX}${JSON.stringify({ event, ...payload })}`);  // eslint-disable-line no-console
 }
 
+function createGracefulShutdownController({
+  processImpl = process,
+  logger = console
+} = {}) {
+  let context = null;
+  let closePromise = null;
+  let shutdownPromise = null;
+  const handlers = new Map();
+
+  async function closeContext(reason = "shutdown") {
+    if (closePromise) {
+      return closePromise;
+    }
+
+    const activeContext = context;
+    context = null;
+
+    if (!activeContext || typeof activeContext.close !== "function") {
+      return false;
+    }
+
+    closePromise = Promise.resolve()
+      .then(() => activeContext.close())
+      .then(() => true)
+      .catch((error) => {
+        if (logger && typeof logger.error === "function") {
+          logger.error(`Could not close Chromium context during ${reason}: ${error?.message || error}`);  // eslint-disable-line no-console
+        }
+        if (processImpl && !processImpl.exitCode) {
+          processImpl.exitCode = 1;
+        }
+        return false;
+      });
+
+    return closePromise;
+  }
+
+  function requestShutdown(signal) {
+    if (shutdownPromise) {
+      return shutdownPromise;
+    }
+
+    const exitCode = SIGNAL_EXIT_CODES[signal] || 1;
+    if (processImpl && !processImpl.exitCode) {
+      processImpl.exitCode = exitCode;
+    }
+
+    if (logger && typeof logger.log === "function") {
+      logger.log(`Received ${signal}; closing Chromium before exiting.`);  // eslint-disable-line no-console
+    }
+
+    shutdownPromise = closeContext(signal)
+      .finally(() => {
+        if (processImpl && typeof processImpl.exit === "function") {
+          processImpl.exit(processImpl.exitCode || exitCode);
+        }
+      });
+
+    return shutdownPromise;
+  }
+
+  function install() {
+    if (!processImpl || typeof processImpl.once !== "function") {
+      return;
+    }
+
+    ["SIGTERM", "SIGINT"].forEach((signal) => {
+      if (handlers.has(signal)) {
+        return;
+      }
+
+      const handler = () => {
+        void requestShutdown(signal);
+      };
+      handlers.set(signal, handler);
+      processImpl.once(signal, handler);
+    });
+  }
+
+  function dispose() {
+    if (!processImpl || typeof processImpl.off !== "function") {
+      handlers.clear();
+      return;
+    }
+
+    handlers.forEach((handler, signal) => {
+      processImpl.off(signal, handler);
+    });
+    handlers.clear();
+  }
+
+  return {
+    setContext(nextContext) {
+      context = nextContext || null;
+    },
+    clearContext() {
+      context = null;
+    },
+    closeContext,
+    requestShutdown,
+    install,
+    dispose
+  };
+}
+
 function usage() {
   return [
     "Usage:",
@@ -745,6 +854,8 @@ async function run() {
   validateConfig(config);
 
   let context;
+  const shutdown = createGracefulShutdownController();
+  shutdown.install();
 
   try {
     const browserChromium = loadChromium();
@@ -770,6 +881,7 @@ async function run() {
         `--load-extension=${config.extensionPath}`
       ]
     });
+    shutdown.setContext(context);
 
     await context.addInitScript(STEALTH_INIT_SCRIPT);
 
@@ -831,9 +943,8 @@ async function run() {
       process.exitCode = 1;
     }
   } finally {
-    if (context) {
-      await context.close();
-    }
+    await shutdown.closeContext("runner finish");
+    shutdown.dispose();
   }
 }
 
@@ -852,6 +963,7 @@ module.exports = {
   buildProxyConfig,
   buildStartPayload,
   computeUnpackedExtensionId,
+  createGracefulShutdownController,
   describeProxy,
   seedExtensionPreferences,
   getRunFromState,

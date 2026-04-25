@@ -30,6 +30,9 @@ const {
 
 const {
   isRunningRun,
+  hasPendingProxyOperations,
+  incrementPendingProxyOperations,
+  decrementPendingProxyOperations,
   trimOutputTables,
   appendRowsToOutputPreview,
   shouldProcessExecutionResult,
@@ -116,6 +119,7 @@ const OUTPUT_PREVIEW_ROW_LIMIT = 250;
 const PERSISTED_OUTPUT_PREVIEW_ROW_LIMIT = 50;
 const PERSISTED_QUEUE_PREVIEW_LIMIT = 100;
 const PERSISTED_VISITED_URL_PREVIEW_LIMIT = 250;
+const AUTO_PROXY_ROTATE_INTERVAL_MS = 10 * 60 * 1000;
 
 const DEFAULT_SCRIPT = `steps.start = function start() {
   const rows = [];
@@ -156,6 +160,7 @@ let loginTabId = null;
 const uiPorts = new Set();
 const runTimers = new Map();
 const portalResumeTimers = new Map();
+const proxyRotationTimers = new Map();
 let persistTimer = null;
 let uiDisconnectAbortTimer = null;
 let userScriptWorldReady = null;
@@ -245,9 +250,9 @@ const legacyServices = {
   setRetries: (tabId, retries) => setRetries(tabId, retries),
   setUserAgent: (tabId, ua) => setUserAgent(tabId, ua),
   updateRunConfig: (tabId, settings) => updateRunConfig(tabId, settings),
-  setProxyDirect: (proxy) => setProxyDirect(proxy),
+  setProxyDirect: (proxy, tabId) => setProxyDirect(proxy, tabId),
   setProxyFromPortalTag: (tag, tabId) => setProxyFromPortalTag(tag, tabId),
-  resetProxySettings: () => resetProxySettings(),
+  resetProxySettings: (tabId) => resetProxySettings(tabId),
   setImagesAllowed: (allowed) => setImagesAllowed(allowed),
   clearCookies: (domain) => clearCookies(domain),
   clearBrowsingData: (origins, settings) => clearBrowsingData(origins, settings),
@@ -926,7 +931,9 @@ function hydrateRun(run) {
     tabId: Number.isInteger(run.tabId) ? run.tabId : null,
     updatedAt: run.updatedAt || new Date().toISOString(),
     executionToken: null,
-    currentStepOutputCheckpoint: null
+    currentStepOutputCheckpoint: null,
+    pendingProxyOperations: 0,
+    activeProxy: null
   };
 }
 
@@ -953,6 +960,7 @@ async function purgeRobotState(robotId) {
     }
 
     clearRunTimer(runId);
+    clearProxyRotationTimer(runId);
     if (run.tabId) {
       await chrome.debugger.detach({ tabId: run.tabId }).catch(() => null);
     }
@@ -1565,13 +1573,73 @@ function updateRunConfig(tabId, settings) {
   return clone(run.config);
 }
 
-async function setProxyDirect(proxy) {
-  const normalized = normalizeProxySpec(proxy);
-  if (!normalized) {
-    await resetProxySettings();
+function beginProxyOperation(tabId, label) {
+  const run = findRunByTabId(tabId);
+
+  if (!isRunningRun(run)) {
+    return null;
+  }
+
+  incrementPendingProxyOperations(run);
+  appendLog(run, `${label} started; queued steps will wait until it finishes.`, "DEBUG");
+  updateSnapshot(run);
+  schedulePersist();
+  schedulePortalResumePersist(run);
+  broadcastState();
+  return run.id;
+}
+
+async function finishProxyOperation(runId, label) {
+  if (!runId) {
     return;
   }
 
+  const run = runtime.runs[runId];
+  if (!run) {
+    return;
+  }
+
+  const remaining = decrementPendingProxyOperations(run);
+  if (remaining === 0) {
+    appendLog(run, `${label} finished.`, "DEBUG");
+  }
+
+  updateSnapshot(run);
+  schedulePersist();
+  schedulePortalResumePersist(run);
+  broadcastState();
+
+  if (remaining === 0 && isRunningRun(run) && !run.currentStep) {
+    await dispatchNextStep(run);
+  }
+}
+
+async function withProxyOperation(tabId, label, operation) {
+  const runId = beginProxyOperation(tabId, label);
+
+  try {
+    return await operation(runId);
+  } catch (error) {
+    const run = runId ? runtime.runs[runId] : null;
+    if (run) {
+      const detail = error instanceof Error ? error.message : String(error);
+      appendLog(run, `${label} failed: ${detail}`, "WARN");
+    }
+    throw error;
+  } finally {
+    await finishProxyOperation(runId, label);
+  }
+}
+
+function shouldApplyProxyForRun(runId) {
+  if (!runId) {
+    return true;
+  }
+
+  return isRunningRun(runtime.runs[runId]);
+}
+
+async function applyNormalizedProxy(normalized) {
   currentProxyAuth = normalized.username
     ? { username: normalized.username, password: normalized.password || "" }
     : null;
@@ -1592,19 +1660,188 @@ async function setProxyDirect(proxy) {
   });
 }
 
+async function applyProxyDirect(proxy) {
+  const normalized = normalizeProxySpec(proxy);
+  if (!normalized) {
+    await applyResetProxySettings();
+    return null;
+  }
+
+  await applyNormalizedProxy(normalized);
+  return normalized;
+}
+
+async function setProxyDirect(proxy, tabId = null) {
+  let normalized = null;
+  await withProxyOperation(tabId, "setProxy()", async (runId) => {
+    if (!shouldApplyProxyForRun(runId)) {
+      return;
+    }
+    normalized = await applyProxyDirect(proxy);
+  });
+
+  if (normalized) {
+    scheduleProxyRotation(tabId, {
+      type: "direct",
+      proxy: normalized
+    });
+  } else {
+    clearProxyRotationForTab(tabId);
+  }
+}
+
 async function setProxyFromPortalTag(tag, tabId) {
   const cleanTag = String(tag || "").trim();
   if (!cleanTag) {
-    await resetProxySettings();
+    await resetProxySettings(tabId);
     return;
   }
 
-  const proxy = await fetchProxyFromPortal(cleanTag);
-  if (!proxy) {
-    throw new Error(`Proxy "${cleanTag}" was not found.`);
+  await withProxyOperation(tabId, `setProxy("${cleanTag}")`, async (runId) => {
+    const proxy = await fetchProxyFromPortal(cleanTag);
+    if (!proxy) {
+      throw new Error(`Proxy "${cleanTag}" was not found.`);
+    }
+    if (!shouldApplyProxyForRun(runId)) {
+      return;
+    }
+    const normalized = normalizeProxySpec(proxy);
+    if (!normalized) {
+      throw new Error(`Proxy "${cleanTag}" did not include a usable server.`);
+    }
+    await applyNormalizedProxy(normalized);
+    logFromTab(tabId, `setProxy("${cleanTag}") applied ${proxy.scheme || "http"}://${proxy.host}:${proxy.port}.`, "INFO");
+  });
+  scheduleProxyRotation(tabId, {
+    type: "portalTag",
+    tag: cleanTag
+  });
+}
+
+function scheduleProxyRotation(tabId, source) {
+  const run = findRunByTabId(tabId);
+
+  if (!isRunningRun(run)) {
+    return false;
   }
-  await setProxyDirect(proxy);
-  logFromTab(tabId, `setProxy("${cleanTag}") applied ${proxy.scheme || "http"}://${proxy.host}:${proxy.port}.`, "INFO");
+
+  run.activeProxy = clone(source);
+  armProxyRotationTimer(run);
+  appendLog(run, `Proxy auto-rotation enabled every ${AUTO_PROXY_ROTATE_INTERVAL_MS / 60_000} minute(s).`, "INFO");
+  updateSnapshot(run);
+  schedulePersist();
+  schedulePortalResumePersist(run);
+  broadcastState();
+  return true;
+}
+
+function armProxyRotationTimer(run) {
+  clearProxyRotationTimer(run.id);
+  proxyRotationTimers.set(run.id, setTimeout(() => {
+    void withReady(async () => {
+      await rotateRunProxy(run.id);
+    });
+  }, AUTO_PROXY_ROTATE_INTERVAL_MS));
+}
+
+function clearProxyRotationTimer(runId) {
+  const timer = proxyRotationTimers.get(runId);
+
+  if (timer) {
+    clearTimeout(timer);
+    proxyRotationTimers.delete(runId);
+  }
+}
+
+function clearProxyRotationForRun(run) {
+  if (!run?.id) {
+    return false;
+  }
+
+  clearProxyRotationTimer(run.id);
+  run.activeProxy = null;
+  updateSnapshot(run);
+  schedulePersist();
+  schedulePortalResumePersist(run);
+  broadcastState();
+  return true;
+}
+
+function clearProxyRotationForTab(tabId) {
+  if (!Number.isInteger(tabId)) {
+    for (const run of Object.values(runtime.runs)) {
+      clearProxyRotationForRun(run);
+    }
+    return true;
+  }
+
+  const run = findRunByTabId(tabId);
+  return clearProxyRotationForRun(run);
+}
+
+async function rotateRunProxy(runId) {
+  const run = runtime.runs[runId];
+  const source = clone(run?.activeProxy);
+
+  if (!isRunningRun(run) || !source) {
+    clearProxyRotationTimer(runId);
+    return;
+  }
+
+  try {
+    if (source.type === "portalTag") {
+      await rotatePortalTagProxy(run, source.tag);
+    } else if (source.type === "direct") {
+      await rotateDirectProxy(run, source.proxy);
+    } else {
+      appendLog(run, "Proxy auto-rotation disabled because the proxy source is unknown.", "WARN");
+      clearProxyRotationForRun(run);
+      return;
+    }
+  } catch (_error) {
+    appendLog(run, "Proxy auto-rotation failed; keeping the current proxy and retrying on the next interval.", "WARN");
+  }
+
+  const liveRun = runtime.runs[runId];
+  if (isRunningRun(liveRun) && liveRun.activeProxy) {
+    armProxyRotationTimer(liveRun);
+  }
+}
+
+async function rotatePortalTagProxy(run, tag) {
+  const cleanTag = String(tag || "").trim();
+  if (!cleanTag) {
+    throw new Error("Proxy tag is empty.");
+  }
+
+  await withProxyOperation(run.tabId, `refreshProxy("${cleanTag}")`, async (runId) => {
+    const proxy = await fetchProxyFromPortal(cleanTag);
+    if (!proxy) {
+      throw new Error(`Proxy "${cleanTag}" was not found.`);
+    }
+    if (!shouldApplyProxyForRun(runId)) {
+      return;
+    }
+    const normalized = normalizeProxySpec(proxy);
+    if (!normalized) {
+      throw new Error(`Proxy "${cleanTag}" did not include a usable server.`);
+    }
+    await applyNormalizedProxy(normalized);
+    appendLog(run, `Refreshed proxy "${cleanTag}" with ${proxy.scheme || "http"}://${proxy.host}:${proxy.port}.`, "INFO");
+  });
+}
+
+async function rotateDirectProxy(run, proxy) {
+  await withProxyOperation(run.tabId, "refreshProxy()", async (runId) => {
+    if (!shouldApplyProxyForRun(runId)) {
+      return;
+    }
+    const normalized = await applyProxyDirect(proxy);
+    if (!normalized) {
+      throw new Error("Direct proxy settings were empty.");
+    }
+    appendLog(run, `Reapplied direct proxy ${normalized.scheme}://${normalized.host}:${normalized.port}.`, "INFO");
+  });
 }
 
 function normalizeProxySpec(proxy) {
@@ -1664,12 +1901,44 @@ function normalizeProxyBypass(value) {
   return [];
 }
 
-async function resetProxySettings() {
+async function applyResetProxySettings() {
   currentProxyAuth = null;
   await chrome.proxy.settings.set({
     value: { mode: "system" },
     scope: "regular"
   });
+}
+
+function hasOtherRunningProxyRun(runId) {
+  return Object.values(runtime.runs).some((run) => (
+    run.id !== runId
+    && isRunningRun(run)
+    && run.activeProxy
+  ));
+}
+
+async function resetProxyAfterRunEnd(run, hadActiveProxy) {
+  if (!hadActiveProxy) {
+    return;
+  }
+
+  if (hasOtherRunningProxyRun(run.id)) {
+    appendLog(run, "Proxy left active because another running run still owns proxy rotation.", "INFO");
+    return;
+  }
+
+  try {
+    await applyResetProxySettings();
+    appendLog(run, "Proxy settings reset after run ended.", "INFO");
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    appendLog(run, `Failed to reset proxy settings after run ended: ${detail}`, "WARN");
+  }
+}
+
+async function resetProxySettings(tabId = null) {
+  await withProxyOperation(tabId, "resetProxy()", () => applyResetProxySettings());
+  clearProxyRotationForTab(tabId);
 }
 
 async function setImagesAllowed(allowed) {
@@ -1793,6 +2062,16 @@ function enqueueSteps(run, steps) {
 
 async function dispatchNextStep(run) {
   if (!run || run.status !== RUN_STATUS.running || run.currentStep) {
+    return;
+  }
+
+  if (hasPendingProxyOperations(run)) {
+    run.phase = "AWAITING_PROXY";
+    appendLog(run, "Waiting for proxy update before dispatching the next step.", "DEBUG");
+    updateSnapshot(run);
+    schedulePersist();
+    schedulePortalResumePersist(run);
+    broadcastState();
     return;
   }
 
@@ -1972,18 +2251,23 @@ async function retryOrFailRun(run, step, { fatal = false } = {}) {
 }
 
 async function finishRun(run, status) {
+  const hadActiveProxy = Boolean(run.activeProxy);
   clearRunTimer(run.id);
+  clearProxyRotationTimer(run.id);
   run.executionToken = null;
   run.currentStepOutputCheckpoint = null;
+  run.activeProxy = null;
   run.status = status;
   run.phase = RUN_STATUS.idle;
   run.currentStep = null;
   run.finishedAt = new Date().toISOString();
   run.updatedAt = run.finishedAt;
 
-   if (run.tabId) {
+  if (run.tabId) {
     await chrome.debugger.detach({ tabId: run.tabId }).catch(() => null);
   }
+
+  await resetProxyAfterRunEnd(run, hadActiveProxy);
 
   updateSnapshot(run);
   schedulePersist();

@@ -197,14 +197,17 @@ test("dispatch setProxy routes server/port/bypass to setProxyDirect", async () =
   );
   assert.deepEqual(spy.calls[0], {
     name: "setProxyDirect",
-    args: [{
-      server: "1.2.3.4",
-      port: 8080,
-      bypass: ["localhost"],
-      username: undefined,
-      password: undefined,
-      scheme: undefined
-    }]
+    args: [
+      {
+        server: "1.2.3.4",
+        port: 8080,
+        bypass: ["localhost"],
+        username: undefined,
+        password: undefined,
+        scheme: undefined
+      },
+      42
+    ]
   });
 });
 
@@ -217,7 +220,7 @@ test("dispatch setProxy2 applies object proxy parameters", async () => {
   );
   assert.deepEqual(spy.calls[0], {
     name: "setProxyDirect",
-    args: [{ server: "1.2.3.4", port: 8080, username: "u" }]
+    args: [{ server: "1.2.3.4", port: 8080, username: "u" }, 42]
   });
 });
 
@@ -233,7 +236,7 @@ test("dispatch setProxyPortal resolves proxy by portal tag", async () => {
 test("dispatch resetProxy calls resetProxySettings", async () => {
   const spy = makeServicesSpy();
   await router.dispatchLegacyMethod({ method: "resetProxy" }, spy.services, sender);
-  assert.deepEqual(spy.calls[0], { name: "resetProxySettings", args: [] });
+  assert.deepEqual(spy.calls[0], { name: "resetProxySettings", args: [42] });
 });
 
 test("dispatch clearCookies and clearBrowsingData forward their payloads", async () => {

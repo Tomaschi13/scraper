@@ -5,6 +5,10 @@ const assert = require("node:assert/strict");
 
 const {
   isRunningRun,
+  getPendingProxyOperationCount,
+  hasPendingProxyOperations,
+  incrementPendingProxyOperations,
+  decrementPendingProxyOperations,
   trimOutputTables,
   appendRowsToOutputPreview,
   shouldProcessExecutionResult,
@@ -19,6 +23,31 @@ test("isRunningRun returns true only for active runs", () => {
   assert.equal(isRunningRun({ status: "RUNNING" }), true);
   assert.equal(isRunningRun({ status: "ABORTED" }), false);
   assert.equal(isRunningRun(null), false);
+});
+
+test("pending proxy operation helpers clamp and mutate counts safely", () => {
+  const run = {};
+
+  assert.equal(getPendingProxyOperationCount(run), 0);
+  assert.equal(hasPendingProxyOperations(run), false);
+
+  assert.equal(incrementPendingProxyOperations(run), 1);
+  assert.equal(incrementPendingProxyOperations(run), 2);
+  assert.equal(getPendingProxyOperationCount(run), 2);
+  assert.equal(hasPendingProxyOperations(run), true);
+
+  assert.equal(decrementPendingProxyOperations(run), 1);
+  assert.equal(decrementPendingProxyOperations(run), 0);
+  assert.equal(decrementPendingProxyOperations(run), 0);
+  assert.equal(hasPendingProxyOperations(run), false);
+});
+
+test("pending proxy operation count treats invalid values as zero", () => {
+  assert.equal(getPendingProxyOperationCount({ pendingProxyOperations: -2 }), 0);
+  assert.equal(getPendingProxyOperationCount({ pendingProxyOperations: "3.8" }), 3);
+  assert.equal(getPendingProxyOperationCount({ pendingProxyOperations: "nope" }), 0);
+  assert.equal(incrementPendingProxyOperations(null), 0);
+  assert.equal(decrementPendingProxyOperations(null), 0);
 });
 
 test("shouldProcessExecutionResult accepts only the live running run with a matching token", () => {

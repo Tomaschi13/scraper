@@ -6,10 +6,12 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { EventEmitter } = require("node:events");
 
 const {
   buildProxyConfig,
   computeUnpackedExtensionId,
+  createGracefulShutdownController,
   describeProxy,
   resolveRobotStartUrl,
   seedExtensionPreferences,
@@ -29,6 +31,20 @@ function createFakePage(states) {
     },
     async waitForTimeout() {
       index += 1;
+    }
+  };
+}
+
+function createFakeProcess() {
+  const events = new EventEmitter();
+  return {
+    exitCode: 0,
+    exitCalls: [],
+    once: events.once.bind(events),
+    off: events.off.bind(events),
+    emit: events.emit.bind(events),
+    exit(code) {
+      this.exitCalls.push(code);
     }
   };
 }
@@ -173,4 +189,70 @@ test("seedExtensionPreferences preserves unrelated prefs fields", () => {
   assert.equal(prefs.profile.name, "keep me");
   assert.equal(prefs.extensions.settings.existing.x, 1);
   assert.equal(prefs.extensions.ui.developer_mode, true);
+});
+
+test("graceful shutdown closes Chromium context before exiting on SIGTERM", async () => {
+  const fakeProcess = createFakeProcess();
+  const logLines = [];
+  let closeCount = 0;
+  let releaseClose;
+  const closeStarted = new Promise((resolve) => {
+    releaseClose = resolve;
+  });
+  const controller = createGracefulShutdownController({
+    processImpl: fakeProcess,
+    logger: {
+      log(message) {
+        logLines.push(message);
+      },
+      error(message) {
+        logLines.push(message);
+      }
+    }
+  });
+
+  controller.setContext({
+    async close() {
+      closeCount += 1;
+      await closeStarted;
+    }
+  });
+  controller.install();
+
+  fakeProcess.emit("SIGTERM");
+  await Promise.resolve();
+
+  assert.equal(closeCount, 1);
+  assert.equal(fakeProcess.exitCode, 143);
+  assert.deepEqual(fakeProcess.exitCalls, []);
+  assert.match(logLines[0], /Received SIGTERM/);
+
+  releaseClose();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(fakeProcess.exitCalls, [143]);
+});
+
+test("graceful shutdown closes Chromium context only once across repeated requests", async () => {
+  const fakeProcess = createFakeProcess();
+  let closeCount = 0;
+  const controller = createGracefulShutdownController({
+    processImpl: fakeProcess,
+    logger: { log() {}, error() {} }
+  });
+
+  controller.setContext({
+    async close() {
+      closeCount += 1;
+    }
+  });
+
+  await Promise.all([
+    controller.requestShutdown("SIGTERM"),
+    controller.requestShutdown("SIGINT")
+  ]);
+
+  assert.equal(closeCount, 1);
+  assert.equal(fakeProcess.exitCode, 143);
+  assert.deepEqual(fakeProcess.exitCalls, [143]);
 });

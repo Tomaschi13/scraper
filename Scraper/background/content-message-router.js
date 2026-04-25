@@ -134,11 +134,11 @@ const contentMessageRouter = (() => {
           username: message.username || message.user_name,
           password: message.password,
           scheme: message.scheme
-        });
+        }, tabId);
         return { ok: true };
 
       case "setProxy2":
-        await services.setProxyDirect(message.parameters || {});
+        await services.setProxyDirect(message.parameters || {}, tabId);
         return { ok: true };
 
       case "setProxyPortal":
@@ -146,7 +146,7 @@ const contentMessageRouter = (() => {
         return { ok: true };
 
       case "resetProxy":
-        await services.resetProxySettings();
+        await services.resetProxySettings(tabId);
         return { ok: true };
 
       case "clearCookies":

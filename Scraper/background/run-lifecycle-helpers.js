@@ -9,6 +9,33 @@ const runLifecycleHelpers = (() => {
     return Boolean(run && run.status === "RUNNING");
   }
 
+  function getPendingProxyOperationCount(run) {
+    const count = Number(run?.pendingProxyOperations);
+    return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+  }
+
+  function hasPendingProxyOperations(run) {
+    return getPendingProxyOperationCount(run) > 0;
+  }
+
+  function incrementPendingProxyOperations(run) {
+    if (!run || typeof run !== "object") {
+      return 0;
+    }
+
+    run.pendingProxyOperations = getPendingProxyOperationCount(run) + 1;
+    return run.pendingProxyOperations;
+  }
+
+  function decrementPendingProxyOperations(run) {
+    if (!run || typeof run !== "object") {
+      return 0;
+    }
+
+    run.pendingProxyOperations = Math.max(getPendingProxyOperationCount(run) - 1, 0);
+    return run.pendingProxyOperations;
+  }
+
   function cloneOutputRow(row) {
     return isObject(row) ? { ...row } : row;
   }
@@ -179,6 +206,10 @@ const runLifecycleHelpers = (() => {
 
   return {
     isRunningRun,
+    getPendingProxyOperationCount,
+    hasPendingProxyOperations,
+    incrementPendingProxyOperations,
+    decrementPendingProxyOperations,
     trimOutputTables,
     appendRowsToOutputPreview,
     shouldProcessExecutionResult,
