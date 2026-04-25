@@ -360,7 +360,11 @@ function bindEvents() {
     }
 
     state.lastSnapshotPreview = response.snapshot;
-    elements.checkResumeLabel.textContent = response.snapshot ? "Snapshot found." : "No snapshot found.";
+    elements.checkResumeLabel.textContent = response.snapshot
+      ? response.snapshot.resumable === false
+        ? "Metadata found. Full queue is too large for local resume."
+        : "Snapshot found."
+      : "No snapshot found.";
     renderResumePreview();
   });
 
@@ -1062,7 +1066,7 @@ function renderResumePreview() {
   }
 
   elements.resumePreviewOutput.textContent = JSON.stringify(snapshot, null, 2);
-  elements.resumeButton.disabled = false;
+  elements.resumeButton.disabled = snapshot.resumable === false;
 }
 
 function collectDraft() {

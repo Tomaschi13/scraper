@@ -175,6 +175,104 @@ export async function updateRunInPortal(run) {
   }
 }
 
+export async function appendRunOutputInPortal(run, tableName, rows, options = {}) {
+  if (!run?.id || !Array.isArray(rows) || rows.length === 0) {
+    return null;
+  }
+
+  try {
+    const data = await portalFetch(`/api/runs/${encodeURIComponent(run.id)}/output`, {
+      method: "POST",
+      body: JSON.stringify({
+        table: tableName,
+        rows,
+        stepId: options.stepId || null
+      })
+    });
+    return data.chunk || null;
+  } catch (error) {
+    console.warn("[portal-sync] appendRunOutputInPortal failed:", error.message);
+    return null;
+  }
+}
+
+export async function discardRunOutputForStepInPortal(run, stepId) {
+  if (!run?.id || !stepId) {
+    return false;
+  }
+
+  try {
+    await portalFetch(`/api/runs/${encodeURIComponent(run.id)}/output/steps/${encodeURIComponent(stepId)}`, {
+      method: "DELETE"
+    });
+    return true;
+  } catch (error) {
+    console.warn("[portal-sync] discardRunOutputForStepInPortal failed:", error.message);
+    return false;
+  }
+}
+
+export async function updateRunResumeStateInPortal(run) {
+  if (!run?.id) {
+    return null;
+  }
+
+  try {
+    const data = await portalFetch(`/api/runs/${encodeURIComponent(run.id)}/resume`, {
+      method: "PUT",
+      body: JSON.stringify({
+        status: run.status || "RUNNING",
+        phase: run.phase || "IDLE",
+        currentUrl: run.currentUrl || "",
+        queue: Array.isArray(run.queue) ? run.queue : [],
+        visitedUrls: Array.isArray(run.visitedUrls) ? run.visitedUrls : [],
+        visitedMap: run.visitedMap && typeof run.visitedMap === "object" ? run.visitedMap : {},
+        currentStep: run.currentStep || null,
+        outputTables: run.outputTables || {},
+        code: run.code || "",
+        logs: Array.isArray(run.logs) ? run.logs.slice(-300) : [],
+        retries: run.retries || null,
+        config: run.config || null,
+        failures: run.failures || 0,
+        emits: run.emits || 0,
+        rows: run.rows || 0,
+        runSource: run.runSource || "LOCAL_EXTENSION"
+      })
+    });
+    return data.resume || null;
+  } catch (error) {
+    console.warn("[portal-sync] updateRunResumeStateInPortal failed:", error.message);
+    return null;
+  }
+}
+
+export async function fetchRunResumeStateFromPortal(runId) {
+  const cleanRunId = String(runId || "").trim();
+  if (!cleanRunId) {
+    return null;
+  }
+
+  try {
+    const data = await portalFetch(`/api/runs/${encodeURIComponent(cleanRunId)}/resume`);
+    return data.resume || null;
+  } catch (error) {
+    if (error.status === 404) {
+      return null;
+    }
+    console.warn("[portal-sync] fetchRunResumeStateFromPortal failed:", error.message);
+    return null;
+  }
+}
+
+export async function fetchProxyFromPortal(tag) {
+  const cleanTag = String(tag || "").trim();
+  if (!cleanTag) {
+    throw new Error("Proxy name is required.");
+  }
+  const data = await portalFetch(`/api/proxies/${encodeURIComponent(cleanTag)}/resolve`);
+  return data.proxy || null;
+}
+
 function buildRunPayload(run) {
   return {
     id: run.id,

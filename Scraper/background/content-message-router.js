@@ -85,7 +85,7 @@ const contentMessageRouter = (() => {
       case "emitS3":
       case "emitfb": {
         const rows = Array.isArray(message.rows) ? message.rows : [];
-        services.emitRowsFromRuntime(tabId, message.table || "", rows);
+        await services.emitRowsFromRuntime(tabId, message.table || "", rows);
         if (message.method === "emitBQ" && message.bqTable) {
           services.logFromTab(tabId, `emitBQ target: ${message.bqTable}`, "DEBUG");
         }
@@ -130,16 +130,19 @@ const contentMessageRouter = (() => {
         await services.setProxyDirect({
           server: message.server,
           port: message.port,
-          bypass: message.bypass
+          bypass: message.bypass,
+          username: message.username || message.user_name,
+          password: message.password,
+          scheme: message.scheme
         });
         return { ok: true };
 
       case "setProxy2":
-        services.logFromTab(tabId, "setProxy(object) is not supported in the local rebuild; configure proxy via setProxy(server, port, bypass).", "WARN");
+        await services.setProxyDirect(message.parameters || {});
         return { ok: true };
 
       case "setProxyPortal":
-        services.logFromTab(tabId, `setProxy(tag=${message.tag}) portal lookup is not supported in the local rebuild.`, "WARN");
+        await services.setProxyFromPortalTag(message.tag, tabId);
         return { ok: true };
 
       case "resetProxy":

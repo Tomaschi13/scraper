@@ -2,8 +2,13 @@ import {
   updateRobotInPortal,
   createRunInPortal,
   updateRunInPortal,
+  appendRunOutputInPortal,
+  discardRunOutputForStepInPortal,
+  updateRunResumeStateInPortal,
+  fetchRunResumeStateFromPortal,
   fetchRobotsFromPortal,
   fetchRobotFromPortal,
+  fetchProxyFromPortal,
   setAuthToken,
   clearAuthToken,
   setAuthRequiredCallback
@@ -25,6 +30,8 @@ const {
 
 const {
   isRunningRun,
+  trimOutputTables,
+  appendRowsToOutputPreview,
   shouldProcessExecutionResult,
   createStepOutputCheckpoint,
   rollbackStepOutput,
@@ -105,6 +112,10 @@ const IDE_WINDOW_OPTIONS = {
 const UI_DISCONNECT_ABORT_DELAY_MS = 500;
 const UI_RUN_HISTORY_LIMIT = 20;
 const PORTAL_AUTH_COOKIE_NAME = "auth_token";
+const OUTPUT_PREVIEW_ROW_LIMIT = 250;
+const PERSISTED_OUTPUT_PREVIEW_ROW_LIMIT = 50;
+const PERSISTED_QUEUE_PREVIEW_LIMIT = 100;
+const PERSISTED_VISITED_URL_PREVIEW_LIMIT = 250;
 
 const DEFAULT_SCRIPT = `steps.start = function start() {
   const rows = [];
@@ -144,9 +155,11 @@ let loginTabId = null;
 
 const uiPorts = new Set();
 const runTimers = new Map();
+const portalResumeTimers = new Map();
 let persistTimer = null;
 let uiDisconnectAbortTimer = null;
 let userScriptWorldReady = null;
+let currentProxyAuth = null;
 
 const ready = initialize();
 
@@ -204,6 +217,24 @@ if (chrome.cookies?.onChanged?.addListener) {
   });
 }
 
+if (chrome.webRequest?.onAuthRequired?.addListener) {
+  chrome.webRequest.onAuthRequired.addListener(
+    (details) => {
+      if (!details?.isProxy || !currentProxyAuth?.username) {
+        return {};
+      }
+      return {
+        authCredentials: {
+          username: currentProxyAuth.username,
+          password: currentProxyAuth.password || ""
+        }
+      };
+    },
+    { urls: ["<all_urls>"] },
+    ["blocking"]
+  );
+}
+
 const legacyServices = {
   logFromTab: (tabId, message, level) => logFromTab(tabId, message, level),
   queueStepsFromRuntime: (tabId, steps) => queueStepsFromRuntime(tabId, steps),
@@ -215,6 +246,7 @@ const legacyServices = {
   setUserAgent: (tabId, ua) => setUserAgent(tabId, ua),
   updateRunConfig: (tabId, settings) => updateRunConfig(tabId, settings),
   setProxyDirect: (proxy) => setProxyDirect(proxy),
+  setProxyFromPortalTag: (tag, tabId) => setProxyFromPortalTag(tag, tabId),
   resetProxySettings: () => resetProxySettings(),
   setImagesAllowed: (allowed) => setImagesAllowed(allowed),
   clearCookies: (domain) => clearCookies(domain),
@@ -661,7 +693,7 @@ async function handleMessage(message, sender) {
     case "CHECK_RESUME":
       await pullRobotsFromPortal();
       await promptForAuthenticationIfNeeded();
-      return { ok: true, snapshot: getSnapshot(message.runId) };
+      return { ok: true, snapshot: await getSnapshot(message.runId) };
     case "RESUME_RUN":
       await pullRobotsFromPortal();
       await promptForAuthenticationIfNeeded();
@@ -798,7 +830,8 @@ function buildUiState() {
         status: snapshot.status,
         startedAt: snapshot.startedAt,
         updatedAt: snapshot.updatedAt,
-        remainingSteps: snapshot.queue.length + (snapshot.currentStep ? 1 : 0)
+        remainingSteps: (snapshot.queueLength ?? snapshot.queue?.length ?? 0) + (snapshot.currentStep ? 1 : 0),
+        resumable: snapshot.resumable !== false
       }))
   };
 }
@@ -886,6 +919,9 @@ function hydrateRun(run) {
       : RUN_SOURCE.localExtension,
     visitedUrls: Array.isArray(run.visitedUrls) ? run.visitedUrls : [],
     visitedMap: isObject(run.visitedMap) ? run.visitedMap : {},
+    storedQueueLength: Number.isFinite(Number(run.queueLength)) ? Number(run.queueLength) : null,
+    storedVisitedUrlCount: Number.isFinite(Number(run.visitedUrlCount)) ? Number(run.visitedUrlCount) : null,
+    resumable: run.resumable !== false,
     code: typeof run.code === "string" ? run.code : DEFAULT_SCRIPT,
     tabId: Number.isInteger(run.tabId) ? run.tabId : null,
     updatedAt: run.updatedAt || new Date().toISOString(),
@@ -1130,7 +1166,7 @@ async function startRun(payload) {
   updateSnapshot(run);
   schedulePersist();
   broadcastState();
-  void createRunInPortal(run);
+  void createRunInPortal(run).then(() => updateRunResumeStateInPortal(run));
   await dispatchNextStep(run);
   return summarizeRun(run);
 }
@@ -1159,12 +1195,19 @@ async function stopRunByTab(tabId) {
   return true;
 }
 
-function getSnapshot(runId) {
-  return snapshots[runId] || null;
+async function getSnapshot(runId) {
+  const localSnapshot = snapshots[runId] || null;
+
+  if (localSnapshot && localSnapshot.resumable !== false) {
+    return localSnapshot;
+  }
+
+  const portalSnapshot = await fetchRunResumeStateFromPortal(runId);
+  return portalSnapshot || localSnapshot;
 }
 
 async function resumeRun(runId) {
-  const snapshot = snapshots[runId];
+  const snapshot = await getSnapshot(runId);
 
   if (!snapshot) {
     throw new Error("No saved snapshot for that run ID.");
@@ -1172,6 +1215,10 @@ async function resumeRun(runId) {
 
   if (snapshot.robotId && !getLocalRobot(snapshot.robotId)) {
     throw new Error(deletedRobotMessage());
+  }
+
+  if (snapshot.resumable === false) {
+    throw new Error("This snapshot is metadata-only and no portal resume state was found for the full queue.");
   }
 
   const run = hydrateRun({
@@ -1210,6 +1257,7 @@ async function resumeRun(runId) {
 
   updateSnapshot(run);
   schedulePersist();
+  schedulePortalResumePersist(run);
   broadcastState();
   await dispatchNextStep(run);
   return summarizeRun(run);
@@ -1230,6 +1278,7 @@ async function onRuntimeReady(tab, pageUrl) {
 
   run.currentUrl = pageUrl || liveTab?.url || tab.url || run.currentUrl;
   updateSnapshot(run);
+  schedulePortalResumePersist(run);
 
   if (!shouldExecuteRunOnRuntimeReady(run)) {
     schedulePersist();
@@ -1340,6 +1389,7 @@ async function queueStepsFromRuntime(tabId, steps) {
   enqueueSteps(run, steps.map((step) => createStep(step)));
   updateSnapshot(run);
   schedulePersist();
+  schedulePortalResumePersist(run);
   broadcastState();
 
   if (!run.currentStep) {
@@ -1349,7 +1399,7 @@ async function queueStepsFromRuntime(tabId, steps) {
   return true;
 }
 
-function emitRowsFromRuntime(tabId, tableName, rows) {
+async function emitRowsFromRuntime(tabId, tableName, rows) {
   const run = findRunByTabId(tabId);
 
   if (!run || run.status !== RUN_STATUS.running || typeof tableName !== "string") {
@@ -1359,16 +1409,17 @@ function emitRowsFromRuntime(tabId, tableName, rows) {
   const sanitizedName = tableName.trim().replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 50) || "output";
   const nextRows = Array.isArray(rows) ? rows : [];
 
-  if (!run.outputTables[sanitizedName]) {
-    run.outputTables[sanitizedName] = [];
-  }
-
-  for (const row of nextRows) {
-    run.outputTables[sanitizedName].push({
+  const emittedRows = nextRows.map((row) => ({
       ...(isObject(row) ? row : { value: row }),
       source_url: run.currentUrl || run.startUrl
-    });
-  }
+  }));
+
+  run.outputTables = appendRowsToOutputPreview(
+    run.outputTables,
+    sanitizedName,
+    emittedRows,
+    OUTPUT_PREVIEW_ROW_LIMIT
+  );
 
   run.emits += 1;
   run.rows += nextRows.length;
@@ -1376,7 +1427,11 @@ function emitRowsFromRuntime(tabId, tableName, rows) {
   appendLog(run, `Emit ${sanitizedName}: ${nextRows.length} row(s)`, "INFO");
   updateSnapshot(run);
   schedulePersist();
+  schedulePortalResumePersist(run);
   broadcastState();
+  await appendRunOutputInPortal(run, sanitizedName, emittedRows, {
+    stepId: run.currentStep?.id || null
+  });
   void updateRunInPortal(run);
   return true;
 }
@@ -1407,6 +1462,7 @@ async function completeStep(tabId, pageUrl, pageTitle = "") {
   appendLog(run, "Step completed.", "INFO");
   updateSnapshot(run);
   schedulePersist();
+  schedulePortalResumePersist(run);
   broadcastState();
   await dispatchNextStep(run);
 }
@@ -1434,6 +1490,7 @@ function clearRunQueue(tabId) {
   appendLog(run, "Run queue cleared.", "WARN");
   updateSnapshot(run);
   schedulePersist();
+  schedulePortalResumePersist(run);
   broadcastState();
   return true;
 }
@@ -1454,6 +1511,7 @@ function setRetries(tabId, retries) {
   appendLog(run, `Retry policy updated: ${JSON.stringify(run.retries)}`, "INFO");
   updateSnapshot(run);
   schedulePersist();
+  schedulePortalResumePersist(run);
   broadcastState();
   return clone(run.retries);
 }
@@ -1502,33 +1560,112 @@ function updateRunConfig(tabId, settings) {
 
   updateSnapshot(run);
   schedulePersist();
+  schedulePortalResumePersist(run);
   broadcastState();
   return clone(run.config);
 }
 
 async function setProxyDirect(proxy) {
-  if (!proxy.server) {
+  const normalized = normalizeProxySpec(proxy);
+  if (!normalized) {
     await resetProxySettings();
     return;
   }
 
-  const port = Number.isFinite(Number(proxy.port)) ? Number(proxy.port) : 8888;
+  currentProxyAuth = normalized.username
+    ? { username: normalized.username, password: normalized.password || "" }
+    : null;
+
   await chrome.proxy.settings.set({
     value: {
       mode: "fixed_servers",
       rules: {
         singleProxy: {
-          host: proxy.server,
-          port
+          scheme: normalized.scheme,
+          host: normalized.host,
+          port: normalized.port
         },
-        bypassList: Array.isArray(proxy.bypass) ? proxy.bypass : []
+        bypassList: normalized.bypass
       }
     },
     scope: "regular"
   });
 }
 
+async function setProxyFromPortalTag(tag, tabId) {
+  const cleanTag = String(tag || "").trim();
+  if (!cleanTag) {
+    await resetProxySettings();
+    return;
+  }
+
+  const proxy = await fetchProxyFromPortal(cleanTag);
+  if (!proxy) {
+    throw new Error(`Proxy "${cleanTag}" was not found.`);
+  }
+  await setProxyDirect(proxy);
+  logFromTab(tabId, `setProxy("${cleanTag}") applied ${proxy.scheme || "http"}://${proxy.host}:${proxy.port}.`, "INFO");
+}
+
+function normalizeProxySpec(proxy) {
+  if (!proxy || typeof proxy !== "object") {
+    return null;
+  }
+
+  const rulesProxy = proxy.rules?.singleProxy || proxy.proxy?.rules?.singleProxy || null;
+  const rawServer = String(
+    proxy.server || proxy.host || proxy.ip || rulesProxy?.host || ""
+  ).trim();
+  if (!rawServer) {
+    return null;
+  }
+
+  let scheme = String(proxy.scheme || rulesProxy?.scheme || "http").trim().toLowerCase();
+  let host = rawServer;
+  let portValue = proxy.port ?? rulesProxy?.port ?? 8888;
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(rawServer)) {
+    const parsed = new URL(rawServer);
+    scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
+    host = parsed.hostname;
+    if (parsed.port) {
+      portValue = parsed.port;
+    }
+  }
+
+  const port = Number(portValue);
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error("Proxy port must be an integer from 1 to 65535.");
+  }
+  if (!["http", "https", "socks4", "socks5"].includes(scheme)) {
+    throw new Error("Proxy scheme must be http, https, socks4, or socks5.");
+  }
+
+  return {
+    scheme,
+    host,
+    port,
+    username: String(proxy.username || proxy.user_name || "").trim(),
+    password: String(proxy.password || ""),
+    bypass: normalizeProxyBypass(proxy.bypass ?? proxy.bypassList ?? proxy.rules?.bypassList ?? proxy.proxy?.rules?.bypassList)
+  };
+}
+
+function normalizeProxyBypass(value) {
+  if (!value) {
+    return [];
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => String(entry || "").trim()).filter(Boolean);
+  }
+  if (typeof value === "string") {
+    return value.split(",").map((entry) => entry.trim()).filter(Boolean);
+  }
+  return [];
+}
+
 async function resetProxySettings() {
+  currentProxyAuth = null;
   await chrome.proxy.settings.set({
     value: { mode: "system" },
     scope: "regular"
@@ -1687,6 +1824,7 @@ async function dispatchNextStep(run) {
   armRunTimer(run);
   updateSnapshot(run);
   schedulePersist();
+  schedulePortalResumePersist(run);
   broadcastState();
 
   if (nextStep.gofast || !nextStep.url) {
@@ -1732,6 +1870,7 @@ async function completeOpenUrlStep(run, pageUrl) {
   appendLog(run, "URL opened.", "INFO");
   updateSnapshot(run);
   schedulePersist();
+  schedulePortalResumePersist(run);
   broadcastState();
   await dispatchNextStep(run);
 }
@@ -1747,6 +1886,7 @@ async function executeCurrentStep(run) {
   run.updatedAt = new Date().toISOString();
   updateSnapshot(run);
   schedulePersist();
+  schedulePortalResumePersist(run);
   broadcastState();
 
   const step = run.currentStep;
@@ -1785,10 +1925,14 @@ async function executeCurrentStep(run) {
 
 async function retryOrFailRun(run, step, { fatal = false } = {}) {
   run.executionToken = null;
+  const failedStepId = step?.id || run.currentStep?.id || null;
   const rollback = rollbackStepOutput(run, run.currentStepOutputCheckpoint);
   run.currentStepOutputCheckpoint = null;
 
   if (rollback.removedRows > 0 || rollback.removedEmits > 0) {
+    if (failedStepId) {
+      await discardRunOutputForStepInPortal(run, failedStepId);
+    }
     appendLog(
       run,
       `Discarded ${rollback.removedRows} row(s) from ${rollback.removedEmits} emit(s) because step ${describeStep(step)} failed.`,
@@ -1811,6 +1955,7 @@ async function retryOrFailRun(run, step, { fatal = false } = {}) {
     appendLog(run, `Retrying step ${describeStep(updatedStep)}. Attempt ${nextAttempt}.`, "WARN");
     updateSnapshot(run);
     schedulePersist();
+    schedulePortalResumePersist(run);
     broadcastState();
     await dispatchNextStep(run);
     return;
@@ -1843,10 +1988,32 @@ async function finishRun(run, status) {
   updateSnapshot(run);
   schedulePersist();
   broadcastState();
+  await flushPortalResumePersist(run);
   void updateRunInPortal(run);
 }
 
 function updateSnapshot(run) {
+  const observedQueueLength = Array.isArray(run.queue) ? run.queue.length : 0;
+  const observedVisitedUrlCount = Array.isArray(run.visitedUrls) ? run.visitedUrls.length : 0;
+  const storedQueueLength = Number.isFinite(Number(run.storedQueueLength)) ? Number(run.storedQueueLength) : null;
+  const storedVisitedUrlCount = Number.isFinite(Number(run.storedVisitedUrlCount)) ? Number(run.storedVisitedUrlCount) : null;
+  const queueLength = storedQueueLength !== null && run.status !== RUN_STATUS.running
+    ? Math.max(storedQueueLength, observedQueueLength)
+    : observedQueueLength;
+  const visitedUrlCount = storedVisitedUrlCount !== null && run.status !== RUN_STATUS.running
+    ? Math.max(storedVisitedUrlCount, observedVisitedUrlCount)
+    : observedVisitedUrlCount;
+  const queuePreview = Array.isArray(run.queue)
+    ? run.queue.slice(-PERSISTED_QUEUE_PREVIEW_LIMIT).map(clone)
+    : [];
+  const visitedUrlPreview = Array.isArray(run.visitedUrls)
+    ? run.visitedUrls.slice(-PERSISTED_VISITED_URL_PREVIEW_LIMIT)
+    : [];
+  const resumable = run.resumable === false
+    ? false
+    : queueLength <= PERSISTED_QUEUE_PREVIEW_LIMIT
+    && visitedUrlCount <= PERSISTED_VISITED_URL_PREVIEW_LIMIT;
+
   snapshots[run.id] = {
     runId: run.id,
     robotId: run.robotId,
@@ -1858,8 +2025,9 @@ function updateSnapshot(run) {
     startedAt: run.startedAt,
     updatedAt: new Date().toISOString(),
     logs: run.logs.slice(-300),
-    outputTables: clone(run.outputTables),
-    queue: clone(run.queue),
+    outputTables: trimOutputTables(run.outputTables, PERSISTED_OUTPUT_PREVIEW_ROW_LIMIT),
+    queue: queuePreview,
+    queueLength,
     currentStep: clone(run.currentStep),
     retries: clone(run.retries),
     config: clone(run.config),
@@ -1867,8 +2035,10 @@ function updateSnapshot(run) {
     emits: run.emits,
     rows: run.rows,
     runSource: run.runSource,
-    visitedUrls: clone(run.visitedUrls),
-    visitedMap: clone(run.visitedMap),
+    visitedUrls: visitedUrlPreview,
+    visitedUrlCount,
+    visitedMap: resumable ? clone(run.visitedMap) : {},
+    resumable,
     code: run.code
   };
 }
@@ -1975,6 +2145,39 @@ function schedulePersist() {
   }, 100);
 }
 
+function schedulePortalResumePersist(run, delayMs = 500) {
+  if (!run?.id) {
+    return;
+  }
+
+  const existingTimer = portalResumeTimers.get(run.id);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+  }
+
+  portalResumeTimers.set(run.id, setTimeout(() => {
+    portalResumeTimers.delete(run.id);
+    const liveRun = runtime.runs[run.id];
+    if (liveRun === run) {
+      void updateRunResumeStateInPortal(run);
+    }
+  }, delayMs));
+}
+
+async function flushPortalResumePersist(run) {
+  if (!run?.id) {
+    return;
+  }
+
+  const existingTimer = portalResumeTimers.get(run.id);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    portalResumeTimers.delete(run.id);
+  }
+
+  await updateRunResumeStateInPortal(run);
+}
+
 async function persistState() {
   await chrome.storage.local.set({
     [STORAGE_KEYS.robots]: robots,
@@ -1992,6 +2195,21 @@ async function persistState() {
 }
 
 function serializeRun(run) {
+  const observedQueueLength = Array.isArray(run.queue) ? run.queue.length : 0;
+  const observedVisitedUrlCount = Array.isArray(run.visitedUrls) ? run.visitedUrls.length : 0;
+  const storedQueueLength = Number.isFinite(Number(run.storedQueueLength)) ? Number(run.storedQueueLength) : null;
+  const storedVisitedUrlCount = Number.isFinite(Number(run.storedVisitedUrlCount)) ? Number(run.storedVisitedUrlCount) : null;
+  const queueLength = storedQueueLength !== null && run.status !== RUN_STATUS.running
+    ? Math.max(storedQueueLength, observedQueueLength)
+    : observedQueueLength;
+  const visitedUrlCount = storedVisitedUrlCount !== null && run.status !== RUN_STATUS.running
+    ? Math.max(storedVisitedUrlCount, observedVisitedUrlCount)
+    : observedVisitedUrlCount;
+  const resumable = run.resumable === false
+    ? false
+    : queueLength <= PERSISTED_QUEUE_PREVIEW_LIMIT
+    && visitedUrlCount <= PERSISTED_VISITED_URL_PREVIEW_LIMIT;
+
   return {
     id: run.id,
     robotId: run.robotId,
@@ -2003,9 +2221,12 @@ function serializeRun(run) {
     currentUrl: run.currentUrl,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
-    logs: run.logs,
-    outputTables: run.outputTables,
-    queue: run.queue,
+    logs: run.logs.slice(-300),
+    outputTables: trimOutputTables(run.outputTables, PERSISTED_OUTPUT_PREVIEW_ROW_LIMIT),
+    queue: Array.isArray(run.queue)
+      ? run.queue.slice(-PERSISTED_QUEUE_PREVIEW_LIMIT).map(clone)
+      : [],
+    queueLength,
     currentStep: run.currentStep,
     retries: run.retries,
     config: run.config,
@@ -2013,8 +2234,12 @@ function serializeRun(run) {
     emits: run.emits,
     rows: run.rows,
     runSource: run.runSource,
-    visitedUrls: run.visitedUrls,
-    visitedMap: run.visitedMap,
+    visitedUrls: Array.isArray(run.visitedUrls)
+      ? run.visitedUrls.slice(-PERSISTED_VISITED_URL_PREVIEW_LIMIT)
+      : [],
+    visitedUrlCount,
+    visitedMap: resumable ? run.visitedMap : {},
+    resumable,
     code: run.code,
     tabId: run.tabId,
     updatedAt: run.updatedAt

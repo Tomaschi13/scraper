@@ -9,6 +9,53 @@ const runLifecycleHelpers = (() => {
     return Boolean(run && run.status === "RUNNING");
   }
 
+  function cloneOutputRow(row) {
+    return isObject(row) ? { ...row } : row;
+  }
+
+  function trimOutputTables(outputTables, rowLimit = 250) {
+    const limit = Math.max(Number(rowLimit) || 0, 0);
+    const tables = {};
+
+    if (!isObject(outputTables) || limit === 0) {
+      return tables;
+    }
+
+    for (const [tableName, rows] of Object.entries(outputTables)) {
+      if (!Array.isArray(rows)) {
+        tables[tableName] = [];
+        continue;
+      }
+      tables[tableName] = rows.slice(-limit).map(cloneOutputRow);
+    }
+
+    return tables;
+  }
+
+  function appendRowsToOutputPreview(outputTables, tableName, rows, rowLimit = 250) {
+    const limit = Math.max(Number(rowLimit) || 0, 0);
+    const tables = isObject(outputTables) ? outputTables : {};
+    const name = String(tableName || "output");
+
+    if (!Array.isArray(tables[name])) {
+      tables[name] = [];
+    }
+
+    if (limit === 0) {
+      tables[name] = [];
+      return tables;
+    }
+
+    const incomingRows = Array.isArray(rows) ? rows : [];
+    tables[name].push(...incomingRows.map(cloneOutputRow));
+
+    if (tables[name].length > limit) {
+      tables[name].splice(0, tables[name].length - limit);
+    }
+
+    return tables;
+  }
+
   function shouldProcessExecutionResult(runtimeState, run, executionToken) {
     if (!runtimeState?.runs || !run || !executionToken) {
       return false;
@@ -132,6 +179,8 @@ const runLifecycleHelpers = (() => {
 
   return {
     isRunningRun,
+    trimOutputTables,
+    appendRowsToOutputPreview,
     shouldProcessExecutionResult,
     createStepOutputCheckpoint,
     rollbackStepOutput,

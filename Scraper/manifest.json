@@ -14,6 +14,8 @@
     "proxy",
     "storage",
     "tabs",
+    "webRequest",
+    "webRequestAuthProvider",
     "userScripts"
   ],
   "host_permissions": [
