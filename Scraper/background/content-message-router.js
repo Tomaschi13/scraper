@@ -39,6 +39,15 @@ const contentMessageRouter = (() => {
     };
   }
 
+  function toNextStep(message) {
+    return {
+      url: message.url || "",
+      step: message.step || "start",
+      params: message.params ?? null,
+      gofast: Boolean(message.gofast)
+    };
+  }
+
   async function dispatchLegacyMethod(message, services, sender) {
     const tabId = sender?.tab?.id;
 
@@ -55,13 +64,7 @@ const contentMessageRouter = (() => {
         // Callers always array-wrap next()/fastnext()/nextsel(). Single-message
         // form {method:"next", url, step, params, gofast} also shows up from
         // non-array branches, so normalize both.
-        const step = {
-          url: message.url || "",
-          step: message.step || "start",
-          params: message.params ?? null,
-          gofast: Boolean(message.gofast)
-        };
-        await services.queueStepsFromRuntime(tabId, [step]);
+        await services.queueStepsFromRuntime(tabId, [toNextStep(message)]);
         return { ok: true };
       }
 
@@ -182,6 +185,16 @@ const contentMessageRouter = (() => {
   async function handleLegacyPayload(payload, services, sender) {
     const messages = normalizeLegacyPayload(payload);
     const responses = [];
+
+    if (messages.length && messages.every((message) => message.method === "next")) {
+      try {
+        await services.queueStepsFromRuntime(sender?.tab?.id, messages.map(toNextStep));
+        return messages.map((message) => ({ method: message.method, ok: true }));
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return messages.map((message) => ({ method: message.method, ok: false, error: detail }));
+      }
+    }
 
     for (const message of messages) {
       try {

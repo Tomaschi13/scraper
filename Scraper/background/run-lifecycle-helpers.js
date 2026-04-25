@@ -98,12 +98,46 @@ const runLifecycleHelpers = (() => {
     return `Blocked by a Cloudflare challenge page${context.length ? ` (${context.join(", ")})` : ""}.`;
   }
 
+  function createLegacyQueueEntries(step, options = {}) {
+    const idFactory = typeof options.createId === "function"
+      ? options.createId
+      : (prefix) => `${prefix}_${Math.random().toString(36).slice(2)}`;
+
+    if (!step?.url || step.gofast) {
+      return [{
+        ...step,
+        url: "",
+        ajaxurl: step?.gofast ? (step.ajaxurl || step.url || "") : ""
+      }];
+    }
+
+    return [
+      {
+        ...step,
+        url: "",
+        ajaxurl: ""
+      },
+      {
+        id: idFactory("step"),
+        url: step.url,
+        method: "openUrl",
+        retryCount: 0
+      }
+    ];
+  }
+
+  function isOpenUrlStep(step) {
+    return step?.method === "openUrl";
+  }
+
   return {
     isRunningRun,
     shouldProcessExecutionResult,
     createStepOutputCheckpoint,
     rollbackStepOutput,
-    getBlockedPageError
+    getBlockedPageError,
+    createLegacyQueueEntries,
+    isOpenUrlStep
   };
 })();
 

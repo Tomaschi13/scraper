@@ -8,7 +8,9 @@ const {
   shouldProcessExecutionResult,
   createStepOutputCheckpoint,
   rollbackStepOutput,
-  getBlockedPageError
+  getBlockedPageError,
+  createLegacyQueueEntries,
+  isOpenUrlStep
 } = require("../background/run-lifecycle-helpers.js");
 
 test("isRunningRun returns true only for active runs", () => {
@@ -152,4 +154,72 @@ test("getBlockedPageError does not false-positive on titles that merely mention 
     pageTitle: "Just a moment of your time: our story | Senukai",
     pageUrl: "https://www.senukai.lt/about"
   }), null);
+});
+
+test("createLegacyQueueEntries splits URL steps into execute then openUrl entries", () => {
+  const entries = createLegacyQueueEntries({
+    id: "step_execute",
+    url: "https://example.com/p/1",
+    step: "product",
+    params: { sku: "1" },
+    gofast: false,
+    retryCount: 0
+  }, {
+    createId: () => "step_open"
+  });
+
+  assert.deepEqual(entries, [
+    {
+      id: "step_execute",
+      url: "",
+      step: "product",
+      params: { sku: "1" },
+      gofast: false,
+      retryCount: 0,
+      ajaxurl: ""
+    },
+    {
+      id: "step_open",
+      url: "https://example.com/p/1",
+      method: "openUrl",
+      retryCount: 0
+    }
+  ]);
+  assert.equal(isOpenUrlStep(entries[1]), true);
+});
+
+test("createLegacyQueueEntries keeps empty-url and gofast steps execute-only", () => {
+  assert.deepEqual(createLegacyQueueEntries({
+    id: "step_inline",
+    url: "",
+    step: "inline",
+    params: null,
+    gofast: false,
+    retryCount: 0
+  }), [{
+    id: "step_inline",
+    url: "",
+    step: "inline",
+    params: null,
+    gofast: false,
+    retryCount: 0,
+    ajaxurl: ""
+  }]);
+
+  assert.deepEqual(createLegacyQueueEntries({
+    id: "step_fast",
+    url: "https://example.com/list",
+    step: "grid",
+    params: null,
+    gofast: true,
+    retryCount: 0
+  }), [{
+    id: "step_fast",
+    url: "",
+    step: "grid",
+    params: null,
+    gofast: true,
+    retryCount: 0,
+    ajaxurl: "https://example.com/list"
+  }]);
 });

@@ -270,6 +270,8 @@ steps.grid = async function grid(params) {
     }
   }
 
+  // The runner dispatches queued steps with pop(), so enqueue the next grid
+  // page before products; the product pages below will run first.
   if (nextPageUrl) {
     next(nextPageUrl, "grid", {
       category_url: categoryUrl,
