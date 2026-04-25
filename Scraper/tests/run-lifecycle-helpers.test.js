@@ -5,6 +5,8 @@ const assert = require("node:assert/strict");
 
 const {
   isRunningRun,
+  trimOutputTables,
+  appendRowsToOutputPreview,
   shouldProcessExecutionResult,
   createStepOutputCheckpoint,
   rollbackStepOutput,
@@ -68,6 +70,38 @@ test("shouldProcessExecutionResult rejects non-running runs even when the token 
   };
 
   assert.equal(shouldProcessExecutionResult(runtimeState, run, "exec_1"), false);
+});
+
+test("appendRowsToOutputPreview keeps only the newest preview rows", () => {
+  const tables = {
+    products: [{ sku: "old" }]
+  };
+
+  appendRowsToOutputPreview(tables, "products", [
+    { sku: "A" },
+    { sku: "B" },
+    { sku: "C" }
+  ], 2);
+
+  assert.deepEqual(tables, {
+    products: [{ sku: "B" }, { sku: "C" }]
+  });
+});
+
+test("trimOutputTables creates a bounded copy for persistence", () => {
+  const original = {
+    products: [{ sku: "A" }, { sku: "B" }, { sku: "C" }],
+    emptyish: "not rows"
+  };
+
+  const trimmed = trimOutputTables(original, 2);
+  trimmed.products[0].sku = "changed";
+
+  assert.deepEqual(trimmed, {
+    products: [{ sku: "changed" }, { sku: "C" }],
+    emptyish: []
+  });
+  assert.equal(original.products[1].sku, "B");
 });
 
 test("createStepOutputCheckpoint snapshots current table lengths and counters", () => {

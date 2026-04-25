@@ -24,6 +24,7 @@ function makeServicesSpy() {
       setUserAgent: record("setUserAgent"),
       updateRunConfig: record("updateRunConfig"),
       setProxyDirect: record("setProxyDirect"),
+      setProxyFromPortalTag: record("setProxyFromPortalTag"),
       resetProxySettings: record("resetProxySettings"),
       setImagesAllowed: record("setImagesAllowed"),
       clearCookies: record("clearCookies"),
@@ -196,18 +197,37 @@ test("dispatch setProxy routes server/port/bypass to setProxyDirect", async () =
   );
   assert.deepEqual(spy.calls[0], {
     name: "setProxyDirect",
-    args: [{ server: "1.2.3.4", port: 8080, bypass: ["localhost"] }]
+    args: [{
+      server: "1.2.3.4",
+      port: 8080,
+      bypass: ["localhost"],
+      username: undefined,
+      password: undefined,
+      scheme: undefined
+    }]
   });
 });
 
-test("dispatch setProxy2 and setProxyPortal warn instead of mutating proxy", async () => {
-  for (const method of ["setProxy2", "setProxyPortal"]) {
-    const spy = makeServicesSpy();
-    await router.dispatchLegacyMethod({ method, parameters: {}, tag: "my-tag" }, spy.services, sender);
-    assert.equal(spy.calls[0].name, "logFromTab");
-    assert.equal(spy.calls[0].args[2], "WARN");
-    assert.ok(!spy.calls.find((call) => call.name === "setProxyDirect"));
-  }
+test("dispatch setProxy2 applies object proxy parameters", async () => {
+  const spy = makeServicesSpy();
+  await router.dispatchLegacyMethod(
+    { method: "setProxy2", parameters: { server: "1.2.3.4", port: 8080, username: "u" } },
+    spy.services,
+    sender
+  );
+  assert.deepEqual(spy.calls[0], {
+    name: "setProxyDirect",
+    args: [{ server: "1.2.3.4", port: 8080, username: "u" }]
+  });
+});
+
+test("dispatch setProxyPortal resolves proxy by portal tag", async () => {
+  const spy = makeServicesSpy();
+  await router.dispatchLegacyMethod({ method: "setProxyPortal", tag: "my-tag" }, spy.services, sender);
+  assert.deepEqual(spy.calls[0], {
+    name: "setProxyFromPortalTag",
+    args: ["my-tag", 42]
+  });
 });
 
 test("dispatch resetProxy calls resetProxySettings", async () => {
@@ -298,6 +318,7 @@ test("handleLegacyPayload catches per-message throws and records them without sh
     setUserAgent() {},
     updateRunConfig() {},
     setProxyDirect() {},
+    setProxyFromPortalTag() {},
     resetProxySettings() {},
     setImagesAllowed() {},
     clearCookies() {},
