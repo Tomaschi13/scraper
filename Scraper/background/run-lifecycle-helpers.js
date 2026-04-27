@@ -304,6 +304,19 @@ const runLifecycleHelpers = (() => {
     };
   }
 
+  const BLOCKED_PAGE_FAILURE_OPTIONS = Object.freeze({ fatal: false });
+
+  function resolveBlockedPageMaxAttempts({ hasActiveProxy = false } = {}) {
+    return hasActiveProxy ? 2 : 5;
+  }
+
+  function describeBlockedPageStepFailure(blockedPageError, maxAttempts) {
+    return {
+      message: `${blockedPageError} Giving up after ${maxAttempts} attempts.`,
+      options: BLOCKED_PAGE_FAILURE_OPTIONS
+    };
+  }
+
   function getBlockedPageError({ pageTitle = "", pageUrl = "" } = {}) {
     const title = String(pageTitle || "").trim();
     const url = String(pageUrl || "").trim();
@@ -382,6 +395,9 @@ const runLifecycleHelpers = (() => {
     createStepOutputCheckpoint,
     rollbackStepOutput,
     getBlockedPageError,
+    resolveBlockedPageMaxAttempts,
+    describeBlockedPageStepFailure,
+    BLOCKED_PAGE_FAILURE_OPTIONS,
     createLegacyQueueEntries,
     isOpenUrlStep
   };

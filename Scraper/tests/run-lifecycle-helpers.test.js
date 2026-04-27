@@ -20,6 +20,9 @@ const {
   createStepOutputCheckpoint,
   rollbackStepOutput,
   getBlockedPageError,
+  resolveBlockedPageMaxAttempts,
+  describeBlockedPageStepFailure,
+  BLOCKED_PAGE_FAILURE_OPTIONS,
   createLegacyQueueEntries,
   isOpenUrlStep
 } = require("../background/run-lifecycle-helpers.js");
@@ -53,6 +56,33 @@ test("pending proxy operation count treats invalid values as zero", () => {
   assert.equal(getPendingProxyOperationCount({ pendingProxyOperations: "nope" }), 0);
   assert.equal(incrementPendingProxyOperations(null), 0);
   assert.equal(decrementPendingProxyOperations(null), 0);
+});
+
+test("resolveBlockedPageMaxAttempts shrinks the budget when an active proxy can be rotated", () => {
+  assert.equal(resolveBlockedPageMaxAttempts({ hasActiveProxy: true }), 2);
+  assert.equal(resolveBlockedPageMaxAttempts({ hasActiveProxy: false }), 5);
+  assert.equal(resolveBlockedPageMaxAttempts({}), 5);
+  assert.equal(resolveBlockedPageMaxAttempts(), 5);
+});
+
+test("describeBlockedPageStepFailure produces a non-fatal step failure so the proxy can refresh", () => {
+  const failure = describeBlockedPageStepFailure(
+    "Blocked by a Cloudflare challenge page (title \"foo\").",
+    2
+  );
+  assert.equal(
+    failure.message,
+    "Blocked by a Cloudflare challenge page (title \"foo\"). Giving up after 2 attempts."
+  );
+  assert.equal(failure.options, BLOCKED_PAGE_FAILURE_OPTIONS);
+  assert.equal(failure.options.fatal, false);
+});
+
+test("BLOCKED_PAGE_FAILURE_OPTIONS keeps blocked-page failures retryable and immutable", () => {
+  assert.equal(BLOCKED_PAGE_FAILURE_OPTIONS.fatal, false);
+  assert.throws(() => {
+    BLOCKED_PAGE_FAILURE_OPTIONS.fatal = true;
+  });
 });
 
 test("shouldRefreshProxyAfterStepFailure only refreshes active proxies for retryable failures", () => {

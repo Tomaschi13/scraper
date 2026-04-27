@@ -45,6 +45,9 @@ const {
   createStepOutputCheckpoint,
   rollbackStepOutput,
   getBlockedPageError,
+  resolveBlockedPageMaxAttempts,
+  describeBlockedPageStepFailure,
+  BLOCKED_PAGE_FAILURE_OPTIONS,
   createLegacyQueueEntries,
   isOpenUrlStep
 } = globalThis.ScraperRunLifecycleHelpers;
@@ -1339,19 +1342,23 @@ async function onRuntimeReady(tab, pageUrl) {
       broadcastState();
       return;
     }
+    const maxAttempts = resolveBlockedPageMaxAttempts({
+      hasActiveProxy: Boolean(run.activeProxy)
+    });
     run.challengeAttempts = (run.challengeAttempts || 0) + 1;
-    if (run.challengeAttempts > CHALLENGE_MAX_ATTEMPTS) {
-      appendLog(
-        run,
-        `${blockedPageError} Giving up after ${CHALLENGE_MAX_ATTEMPTS} attempts.`,
-        "ERROR"
-      );
-      await finishRun(run, RUN_STATUS.failed);
+    if (run.challengeAttempts > maxAttempts) {
+      const failure = describeBlockedPageStepFailure(blockedPageError, maxAttempts);
+      appendLog(run, failure.message, "ERROR");
+      // Reset so the requeued step starts with a fresh challenge budget on the
+      // next proxy IP — otherwise the counter survives and the retried step
+      // gives up on its first reload.
+      run.challengeAttempts = 0;
+      await retryOrFailRun(run, run.currentStep, failure.options);
       return;
     }
     appendLog(
       run,
-      `${blockedPageError} Waiting for the real page before executing step ${describeStep(run.currentStep)} (attempt ${run.challengeAttempts}/${CHALLENGE_MAX_ATTEMPTS}).`,
+      `${blockedPageError} Waiting for the real page before executing step ${describeStep(run.currentStep)} (attempt ${run.challengeAttempts}/${maxAttempts}).`,
       "WARN"
     );
     schedulePersist();
@@ -1370,7 +1377,6 @@ async function onRuntimeReady(tab, pageUrl) {
 }
 
 const CHALLENGE_RELOAD_DELAY_MS = 15_000;
-const CHALLENGE_MAX_ATTEMPTS = 5;
 
 function scheduleChallengeReload(run, tabId) {
   if (!run || run.challengeReloadTimer) {
@@ -1489,7 +1495,7 @@ async function completeStep(tabId, pageUrl, pageTitle = "") {
   });
 
   if (blockedPageError) {
-    await failCurrentStep(tabId, blockedPageError, { fatal: true });
+    await failCurrentStep(tabId, blockedPageError, BLOCKED_PAGE_FAILURE_OPTIONS);
     return;
   }
 
