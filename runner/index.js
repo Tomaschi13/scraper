@@ -698,6 +698,96 @@ function seedExtensionPreferences(userDataDir, extensionPath) {
   return extensionId;
 }
 
+const EXTENSION_FINGERPRINT_FILE = ".scraper-extension-fingerprint";
+const CACHED_SCRIPT_DIRS = [
+  ["Default", "Service Worker", "ScriptCache"],
+  ["Default", "Service Worker", "CacheStorage"],
+  ["Default", "Code Cache"]
+];
+const CACHE_INVALIDATION_FILE_EXTENSIONS = new Set([
+  ".js", ".mjs", ".cjs", ".html", ".json", ".css"
+]);
+
+function computeExtensionFingerprint(extensionPath) {
+  const root = path.resolve(extensionPath);
+  const stack = [root];
+  let maxMtimeMs = 0;
+  let fileCount = 0;
+
+  while (stack.length) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch (_error) {
+      continue;
+    }
+    for (const entry of entries) {
+      // Skip hidden / nested deps; we only care about source the extension actually loads.
+      if (entry.name === "node_modules" || entry.name.startsWith(".")) {
+        continue;
+      }
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      const ext = path.extname(entry.name).toLowerCase();
+      if (!CACHE_INVALIDATION_FILE_EXTENSIONS.has(ext)) {
+        continue;
+      }
+      try {
+        const stat = fs.statSync(full);
+        if (stat.mtimeMs > maxMtimeMs) {
+          maxMtimeMs = stat.mtimeMs;
+        }
+        fileCount += 1;
+      } catch (_error) {
+        // Vanished between readdir and stat — ignore.
+      }
+    }
+  }
+
+  // Include file count so adding/removing a file invalidates even when mtimes
+  // happen to coincide (e.g. a checkout that touches no files).
+  return `${Math.floor(maxMtimeMs)}:${fileCount}`;
+}
+
+function invalidateExtensionScriptCacheIfStale(userDataDir, extensionPath, { logger = console } = {}) {
+  const resolvedUserDataDir = path.resolve(userDataDir);
+  const fingerprintPath = path.join(resolvedUserDataDir, EXTENSION_FINGERPRINT_FILE);
+  const currentFingerprint = computeExtensionFingerprint(extensionPath);
+
+  let storedFingerprint = "";
+  try {
+    storedFingerprint = fs.readFileSync(fingerprintPath, "utf8").trim();
+  } catch (_error) {
+    // Missing file → treat as stale (first launch with this profile).
+  }
+
+  if (storedFingerprint && storedFingerprint === currentFingerprint) {
+    return false;
+  }
+
+  for (const segments of CACHED_SCRIPT_DIRS) {
+    const dir = path.join(resolvedUserDataDir, ...segments);
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      logger?.warn?.(`Failed to clear Chromium cache dir ${dir}: ${error?.message || error}`);
+    }
+  }
+
+  try {
+    fs.mkdirSync(resolvedUserDataDir, { recursive: true });
+    fs.writeFileSync(fingerprintPath, currentFingerprint);
+  } catch (error) {
+    logger?.warn?.(`Failed to write extension fingerprint to ${fingerprintPath}: ${error?.message || error}`);
+  }
+
+  return true;
+}
+
 function validateConfig(config) {
   const missing = [];
 
@@ -924,6 +1014,10 @@ async function run() {
     const seededExtensionId = seedExtensionPreferences(config.userDataDir, config.extensionPath);
     console.log(`Seeded userScripts allow-list for extension ${seededExtensionId}.`);  // eslint-disable-line no-console
 
+    if (invalidateExtensionScriptCacheIfStale(config.userDataDir, config.extensionPath)) {
+      console.log(`Cleared stale Chromium script cache for extension ${seededExtensionId}.`);  // eslint-disable-line no-console
+    }
+
     context = await browserChromium.launchPersistentContext(config.userDataDir, {
       channel: config.browserChannel,
       headless: config.headless,
@@ -1021,9 +1115,11 @@ module.exports = {
   buildConfig,
   buildProxyConfig,
   buildStartPayload,
+  computeExtensionFingerprint,
   computeUnpackedExtensionId,
   createGracefulShutdownController,
   describeProxy,
+  invalidateExtensionScriptCacheIfStale,
   seedExtensionPreferences,
   getRunFromState,
   resolveRobotStartUrl,

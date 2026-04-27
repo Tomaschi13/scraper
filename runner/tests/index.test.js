@@ -10,9 +10,11 @@ const { EventEmitter } = require("node:events");
 
 const {
   buildProxyConfig,
+  computeExtensionFingerprint,
   computeUnpackedExtensionId,
   createGracefulShutdownController,
   describeProxy,
+  invalidateExtensionScriptCacheIfStale,
   resolveRobotStartUrl,
   seedExtensionPreferences,
   waitForRunnablePage
@@ -214,6 +216,78 @@ test("seedExtensionPreferences preserves unrelated prefs fields", () => {
   assert.equal(prefs.profile.name, "keep me");
   assert.equal(prefs.extensions.settings.existing.x, 1);
   assert.equal(prefs.extensions.ui.developer_mode, true);
+});
+
+function makeExtensionFixture(rootDir, files) {
+  fs.mkdirSync(rootDir, { recursive: true });
+  for (const [relativePath, body] of Object.entries(files)) {
+    const full = path.join(rootDir, relativePath);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, body);
+  }
+}
+
+test("computeExtensionFingerprint changes when source files are touched, added, or removed", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runner-extfp-"));
+  const extensionPath = path.join(root, "ext");
+  makeExtensionFixture(extensionPath, {
+    "manifest.json": "{}",
+    "background/service-worker.js": "// v1\n",
+    "node_modules/should-be-ignored.js": "ignored"
+  });
+
+  const initial = computeExtensionFingerprint(extensionPath);
+  assert.match(initial, /^\d+:2$/, "expected only the 2 in-extension files to count");
+
+  // Touching a file with a later mtime changes the fingerprint.
+  const futureMs = Date.now() + 60_000;
+  fs.utimesSync(path.join(extensionPath, "background/service-worker.js"), futureMs / 1000, futureMs / 1000);
+  const afterTouch = computeExtensionFingerprint(extensionPath);
+  assert.notEqual(afterTouch, initial);
+
+  // Adding a file changes the count even if mtimes happen to coincide.
+  fs.writeFileSync(path.join(extensionPath, "background/new.js"), "// v3\n");
+  const afterAdd = computeExtensionFingerprint(extensionPath);
+  assert.match(afterAdd, /:3$/);
+  assert.notEqual(afterAdd, afterTouch);
+});
+
+test("invalidateExtensionScriptCacheIfStale clears Chromium caches on first run and after extension edits", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "runner-cache-"));
+  const userDataDir = path.join(root, "profile");
+  const extensionPath = path.join(root, "ext");
+
+  makeExtensionFixture(extensionPath, {
+    "manifest.json": "{}",
+    "background/service-worker.js": "// v1\n"
+  });
+
+  const scriptCacheDir = path.join(userDataDir, "Default", "Service Worker", "ScriptCache");
+  const codeCacheDir = path.join(userDataDir, "Default", "Code Cache");
+  fs.mkdirSync(scriptCacheDir, { recursive: true });
+  fs.mkdirSync(codeCacheDir, { recursive: true });
+  fs.writeFileSync(path.join(scriptCacheDir, "stale_bytecode"), "leftover");
+  fs.writeFileSync(path.join(codeCacheDir, "stale_codecache"), "leftover");
+
+  const silentLogger = { warn() {} };
+
+  // First call has no fingerprint stored — must invalidate.
+  assert.equal(invalidateExtensionScriptCacheIfStale(userDataDir, extensionPath, { logger: silentLogger }), true);
+  assert.equal(fs.existsSync(scriptCacheDir), false);
+  assert.equal(fs.existsSync(codeCacheDir), false);
+  assert.ok(fs.existsSync(path.join(userDataDir, ".scraper-extension-fingerprint")));
+
+  // Second call without changes is a no-op.
+  fs.mkdirSync(scriptCacheDir, { recursive: true });
+  fs.writeFileSync(path.join(scriptCacheDir, "fresh_bytecode"), "fresh");
+  assert.equal(invalidateExtensionScriptCacheIfStale(userDataDir, extensionPath, { logger: silentLogger }), false);
+  assert.equal(fs.existsSync(path.join(scriptCacheDir, "fresh_bytecode")), true);
+
+  // Editing the extension invalidates again.
+  const futureMs = Date.now() + 60_000;
+  fs.utimesSync(path.join(extensionPath, "background/service-worker.js"), futureMs / 1000, futureMs / 1000);
+  assert.equal(invalidateExtensionScriptCacheIfStale(userDataDir, extensionPath, { logger: silentLogger }), true);
+  assert.equal(fs.existsSync(scriptCacheDir), false);
 });
 
 test("graceful shutdown closes Chromium context before exiting on SIGTERM", async () => {
