@@ -51,6 +51,84 @@ const CONTROL_PLANE_PROXY_BYPASS_HOSTS = [
   "::1"
 ];
 
+// Aggressive resource blocking. Runs at the Playwright route() layer for
+// every page in the persistent context, so it only ever applies to runs
+// driven by this runner (which is server-only — local runs use the
+// extension directly in the user's Chrome). Goal: cut bandwidth on the
+// residential proxy by dropping anything that isn't required to render
+// the product DOM or pass anti-bot checks.
+const BLOCKED_RESOURCE_TYPES = new Set([
+  "image",
+  "media",
+  "font",
+  "stylesheet"
+]);
+
+// Substrings matched against the request hostname (lower-cased). Any hit
+// aborts the request. Keep this list to vendors that are pure analytics,
+// advertising, session-replay, or tag-management — never anti-bot
+// challenge providers, payment widgets, or anything a site might depend
+// on for hydration.
+const BLOCKED_HOST_PATTERNS = [
+  "google-analytics.com",
+  "googletagmanager.com",
+  "googletagservices.com",
+  "googlesyndication.com",
+  "doubleclick.net",
+  "adservice.google.",
+  "g.doubleclick.net",
+  "connect.facebook.net",
+  "facebook.net",
+  "analytics.tiktok.com",
+  "ads.tiktok.com",
+  "static.ads-twitter.com",
+  "ads-twitter.com",
+  "snap.licdn.com",
+  "px.ads.linkedin.com",
+  "ct.pinterest.com",
+  "bat.bing.com",
+  "clarity.ms",
+  "hotjar.com",
+  "hotjar.io",
+  "mixpanel.com",
+  "cdn.segment.com",
+  "api.segment.io",
+  "amplitude.com",
+  "fullstory.com",
+  "logrocket.com",
+  "newrelic.com",
+  "nr-data.net",
+  "branch.io",
+  "omtrdc.net",
+  "demdex.net",
+  "everesttech.net",
+  "2o7.net",
+  "adobedtm.com",
+  "criteo.com",
+  "criteo.net",
+  "amazon-adsystem.com",
+  "quantserve.com",
+  "scorecardresearch.com",
+  "taboola.com",
+  "outbrain.com",
+  "chartbeat.com",
+  "optimizely.com",
+  "yandex.ru/metrika",
+  "mc.yandex.ru"
+];
+
+// Page-context schemes that must never be intercepted: the extension's
+// internal pages, Chromium UI, and devtools. Blocking here breaks the
+// bridge page and any chrome:// settings the runner touches.
+const RESOURCE_BLOCKER_SCHEME_ALLOWLIST = [
+  "chrome-extension:",
+  "chrome:",
+  "devtools:",
+  "about:",
+  "file:",
+  "data:"
+];
+
 // In-house stealth payload. Mirrors the evasions from
 // puppeteer-extra-plugin-stealth without the plugin's chrome.tabs-breaking
 // hooks. Runs before every page script via context.addInitScript.
@@ -835,6 +913,37 @@ async function callBridge(page, method, payload) {
   });
 }
 
+function shouldBlockRequestForBandwidth(url, resourceType) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch (_err) {
+    return false;
+  }
+
+  if (RESOURCE_BLOCKER_SCHEME_ALLOWLIST.includes(parsed.protocol)) {
+    return false;
+  }
+
+  if (BLOCKED_RESOURCE_TYPES.has(resourceType)) {
+    return true;
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  const haystack = `${hostname}${parsed.pathname.toLowerCase()}`;
+  return BLOCKED_HOST_PATTERNS.some((pattern) => haystack.includes(pattern));
+}
+
+async function installAggressiveResourceBlocker(context) {
+  await context.route("**/*", (route, request) => {
+    if (shouldBlockRequestForBandwidth(request.url(), request.resourceType())) {
+      route.abort().catch(() => { /* request already settled */ });
+      return;
+    }
+    route.continue().catch(() => { /* request already settled */ });
+  });
+}
+
 function buildStartPayload(config) {
   return {
     robotId: config.robotId,
@@ -1036,6 +1145,9 @@ async function run() {
     });
     shutdown.setContext(context);
 
+    await installAggressiveResourceBlocker(context);
+    console.log("Aggressive resource blocking installed (images, media, fonts, stylesheets, analytics).");  // eslint-disable-line no-console
+
     await context.addInitScript(STEALTH_INIT_SCRIPT);
 
     const serviceWorker = await waitForServiceWorker(context);
@@ -1119,10 +1231,12 @@ module.exports = {
   computeUnpackedExtensionId,
   createGracefulShutdownController,
   describeProxy,
+  installAggressiveResourceBlocker,
   invalidateExtensionScriptCacheIfStale,
   seedExtensionPreferences,
   getRunFromState,
   resolveRobotStartUrl,
+  shouldBlockRequestForBandwidth,
   waitForRunnablePage,
   warmRobotStartUrl
 };

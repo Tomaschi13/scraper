@@ -14,9 +14,11 @@ const {
   computeUnpackedExtensionId,
   createGracefulShutdownController,
   describeProxy,
+  installAggressiveResourceBlocker,
   invalidateExtensionScriptCacheIfStale,
   resolveRobotStartUrl,
   seedExtensionPreferences,
+  shouldBlockRequestForBandwidth,
   waitForRunnablePage
 } = require("../index.js");
 
@@ -50,6 +52,75 @@ function createFakeProcess() {
     }
   };
 }
+
+test("shouldBlockRequestForBandwidth aborts heavy resource types on http(s) pages", () => {
+  assert.equal(shouldBlockRequestForBandwidth("https://shop.example.com/banner.jpg", "image"), true);
+  assert.equal(shouldBlockRequestForBandwidth("https://shop.example.com/video.mp4", "media"), true);
+  assert.equal(shouldBlockRequestForBandwidth("https://shop.example.com/font.woff2", "font"), true);
+  assert.equal(shouldBlockRequestForBandwidth("https://shop.example.com/style.css", "stylesheet"), true);
+});
+
+test("shouldBlockRequestForBandwidth aborts known analytics hosts even for scripts/xhr", () => {
+  assert.equal(shouldBlockRequestForBandwidth("https://www.google-analytics.com/analytics.js", "script"), true);
+  assert.equal(shouldBlockRequestForBandwidth("https://www.googletagmanager.com/gtm.js?id=GTM-X", "script"), true);
+  assert.equal(shouldBlockRequestForBandwidth("https://connect.facebook.net/en_US/fbevents.js", "script"), true);
+  assert.equal(shouldBlockRequestForBandwidth("https://stats.g.doubleclick.net/g/collect", "xhr"), true);
+  assert.equal(shouldBlockRequestForBandwidth("https://api.mixpanel.com/track", "xhr"), true);
+});
+
+test("shouldBlockRequestForBandwidth allows first-party HTML, scripts, and xhr", () => {
+  assert.equal(shouldBlockRequestForBandwidth("https://shop.example.com/products/123", "document"), false);
+  assert.equal(shouldBlockRequestForBandwidth("https://shop.example.com/_next/static/app.js", "script"), false);
+  assert.equal(shouldBlockRequestForBandwidth("https://shop.example.com/api/products/123", "xhr"), false);
+  assert.equal(shouldBlockRequestForBandwidth("https://shop.example.com/api/products/123", "fetch"), false);
+});
+
+test("shouldBlockRequestForBandwidth never blocks extension or chrome:// URLs", () => {
+  assert.equal(shouldBlockRequestForBandwidth("chrome-extension://abc/popup.html", "document"), false);
+  assert.equal(shouldBlockRequestForBandwidth("chrome-extension://abc/banner.png", "image"), false);
+  assert.equal(shouldBlockRequestForBandwidth("chrome://settings", "document"), false);
+  assert.equal(shouldBlockRequestForBandwidth("devtools://devtools/bundled/inspector.html", "document"), false);
+});
+
+test("shouldBlockRequestForBandwidth lets anti-bot challenge scripts load", () => {
+  assert.equal(shouldBlockRequestForBandwidth("https://challenges.cloudflare.com/turnstile/v0/api.js", "script"), false);
+  assert.equal(shouldBlockRequestForBandwidth("https://www.google.com/recaptcha/api.js", "script"), false);
+  assert.equal(shouldBlockRequestForBandwidth("https://hcaptcha.com/1/api.js", "script"), false);
+  assert.equal(shouldBlockRequestForBandwidth("https://js.datadome.co/tags.js", "script"), false);
+});
+
+test("installAggressiveResourceBlocker registers a single context-wide route handler", async () => {
+  const routes = [];
+  const fakeContext = {
+    async route(pattern, handler) {
+      routes.push({ pattern, handler });
+    }
+  };
+
+  await installAggressiveResourceBlocker(fakeContext);
+
+  assert.equal(routes.length, 1);
+  assert.equal(routes[0].pattern, "**/*");
+
+  const aborted = [];
+  const continued = [];
+  const handler = routes[0].handler;
+
+  const imageRoute = { abort: async () => { aborted.push("image"); } };
+  await handler(imageRoute, {
+    url: () => "https://shop.example.com/photo.jpg",
+    resourceType: () => "image"
+  });
+
+  const docRoute = { continue: async () => { continued.push("doc"); } };
+  await handler(docRoute, {
+    url: () => "https://shop.example.com/products/1",
+    resourceType: () => "document"
+  });
+
+  assert.deepEqual(aborted, ["image"]);
+  assert.deepEqual(continued, ["doc"]);
+});
 
 test("resolveRobotStartUrl prefers an explicit start-url override", () => {
   const result = resolveRobotStartUrl({
