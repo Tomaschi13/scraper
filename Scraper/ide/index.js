@@ -8,6 +8,11 @@ const {
   normalizeRange
 } = window.ideSearchHelpers;
 const {
+  createWorkspaceRenderSignature,
+  EDITOR_HYDRATION_REASONS,
+  shouldHydrateEditorCode
+} = window.ideEditorHydrationHelpers;
+const {
   createUiTransport
 } = window.ideUiTransportHelpers;
 const AceSearch = ace.require("ace/search").Search;
@@ -116,7 +121,8 @@ const uiTransport = createUiTransport({
   },
   applyState: (nextState) => {
     applyIncomingState(nextState, {
-      fullRender: !hasBootstrappedState
+      fullRender: !hasBootstrappedState,
+      editorHydrationReason: !hasBootstrappedState ? EDITOR_HYDRATION_REASONS.initialLoad : null
     });
   }
 });
@@ -464,7 +470,9 @@ async function loadRobot(robotId) {
       config: response.robot.config
     }
   });
-  render();
+  render({
+    editorHydrationReason: EDITOR_HYDRATION_REASONS.robotLoad
+  });
 }
 
 function mergeState(nextState) {
@@ -484,18 +492,18 @@ function mergeState(nextState) {
   syncSelectedTable();
 }
 
-function applyIncomingState(nextState, { fullRender = false } = {}) {
+function applyIncomingState(nextState, { fullRender = false, editorHydrationReason = null } = {}) {
   const shouldFullRender = fullRender || hasWorkspaceStateChanged(nextState);
   const previousLiveState = captureLiveState();
   mergeState(nextState);
   hasBootstrappedState = true;
 
   if (shouldFullRender) {
-    render();
+    render({ editorHydrationReason });
     return;
   }
 
-  renderLiveState(previousLiveState);
+  renderLiveState(previousLiveState, { editorHydrationReason });
 }
 
 function captureLiveState() {
@@ -512,31 +520,14 @@ function hasWorkspaceStateChanged(nextState) {
 }
 
 function getWorkspaceStateSignature(source = {}) {
-  const draft = source.draft || {};
-  const robots = Array.isArray(source.robots) ? source.robots : [];
-
-  return JSON.stringify({
-    authRequired: Boolean(source.authRequired),
-    draft: {
-      selectedRobotId: draft.selectedRobotId || "",
-      name: draft.name || "",
-      url: draft.url || "",
-      tag: draft.tag || "",
-      code: draft.code || ""
-    },
-    robots: robots.map((robot) => ({
-      id: robot.id || "",
-      name: robot.name || "",
-      updatedAt: robot.updatedAt || ""
-    }))
-  });
+  return createWorkspaceRenderSignature(source);
 }
 
-function renderLiveState(previousLiveState) {
+function renderLiveState(previousLiveState, { editorHydrationReason = null } = {}) {
   const nextLiveState = captureLiveState();
 
   if (previousLiveState.workspaceSignature !== nextLiveState.workspaceSignature) {
-    renderDraft();
+    renderDraft({ editorHydrationReason });
     renderRobots();
     renderPortalStatus();
   }
@@ -610,8 +601,8 @@ function getRunOutputSignature(run, selectedTable) {
   ].join("|");
 }
 
-function render() {
-  renderDraft();
+function render({ editorHydrationReason = null } = {}) {
+  renderDraft({ editorHydrationReason });
   renderRobots();
   renderPortalStatus();
   renderRunSummary();
@@ -621,7 +612,7 @@ function render() {
   setActiveTab(state.activeTab);
 }
 
-function renderDraft() {
+function renderDraft({ editorHydrationReason = null } = {}) {
   if (!state.draft) {
     return;
   }
@@ -644,7 +635,11 @@ function renderDraft() {
   }
   elements.codeInput.value = state.draft.code || "";
 
-  if (aceEditor.getValue() !== (state.draft.code || "")) {
+  if (shouldHydrateEditorCode({
+    reason: editorHydrationReason,
+    currentCode: aceEditor.getValue(),
+    incomingCode: state.draft.code
+  })) {
     aceEditor.setValue(state.draft.code || "", -1);
   }
 }
@@ -1360,7 +1355,8 @@ async function refreshRobotsFromPortal() {
 
   if (response.state) {
     applyIncomingState(response.state, {
-      fullRender: true
+      fullRender: true,
+      editorHydrationReason: EDITOR_HYDRATION_REASONS.robotsRefresh
     });
   }
 
