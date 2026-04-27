@@ -9,6 +9,11 @@ const runLifecycleHelpers = (() => {
     return Boolean(run && run.status === "RUNNING");
   }
 
+  function normalizeNonNegativeInteger(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+  }
+
   function getPendingProxyOperationCount(run) {
     const count = Number(run?.pendingProxyOperations);
     return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
@@ -41,6 +46,155 @@ const runLifecycleHelpers = (() => {
 
     run.pendingProxyOperations = Math.max(getPendingProxyOperationCount(run) - 1, 0);
     return run.pendingProxyOperations;
+  }
+
+  function normalizeProxyUsageSource(source) {
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      return null;
+    }
+
+    const sourceType = String(source.type || "unknown").trim() || "unknown";
+    const proxyTag = sourceType === "portalTag"
+      ? String(source.tag || "").trim()
+      : "";
+    const proxy = source.proxy && typeof source.proxy === "object" ? source.proxy : {};
+    const directLabel = proxy.host
+      ? `${proxy.scheme || "http"}://${proxy.host}:${proxy.port || 8888}`
+      : "direct proxy";
+
+    return {
+      sourceType,
+      proxyTag,
+      label: proxyTag || directLabel
+    };
+  }
+
+  function getProxyUsageKey(source) {
+    const normalized = normalizeProxyUsageSource(source);
+    if (!normalized) {
+      return "";
+    }
+    if (normalized.proxyTag) {
+      return `portalTag:${normalized.proxyTag.toLowerCase()}`;
+    }
+    return `${normalized.sourceType}:${normalized.label}`;
+  }
+
+  function ensureProxyUsageState(run) {
+    if (!run || typeof run !== "object") {
+      return null;
+    }
+    if (!isObject(run.proxyUsage)) {
+      run.proxyUsage = {
+        items: {},
+        activeKey: "",
+        activeStartedAt: null
+      };
+    }
+    if (!isObject(run.proxyUsage.items)) {
+      run.proxyUsage.items = {};
+    }
+    return run.proxyUsage;
+  }
+
+  function ensureProxyUsageItem(run, source) {
+    const usage = ensureProxyUsageState(run);
+    const normalized = normalizeProxyUsageSource(source);
+    const key = getProxyUsageKey(source);
+    if (!usage || !normalized || !key) {
+      return null;
+    }
+    if (!usage.items[key]) {
+      usage.items[key] = {
+        key,
+        sourceType: normalized.sourceType,
+        proxyTag: normalized.proxyTag,
+        label: normalized.label,
+        bytesLoaded: 0,
+        requestCount: 0,
+        proxyActiveMs: 0
+      };
+    }
+    return usage.items[key];
+  }
+
+  function addActiveProxyElapsed(run, nowMs = Date.now()) {
+    const usage = ensureProxyUsageState(run);
+    if (!usage?.activeKey || !Number.isFinite(Number(usage.activeStartedAt))) {
+      return 0;
+    }
+    const startedAt = Number(usage.activeStartedAt);
+    const elapsed = Math.max(normalizeNonNegativeInteger(nowMs - startedAt), 0);
+    const item = usage.items[usage.activeKey];
+    if (item && elapsed) {
+      item.proxyActiveMs = normalizeNonNegativeInteger(item.proxyActiveMs) + elapsed;
+    }
+    usage.activeStartedAt = nowMs;
+    return elapsed;
+  }
+
+  function startProxyUsage(run, source, nowMs = Date.now()) {
+    const usage = ensureProxyUsageState(run);
+    const item = ensureProxyUsageItem(run, source);
+    if (!usage || !item) {
+      return null;
+    }
+
+    if (usage.activeKey && usage.activeKey !== item.key) {
+      addActiveProxyElapsed(run, nowMs);
+    }
+
+    usage.activeKey = item.key;
+    usage.activeStartedAt = usage.activeStartedAt && usage.activeKey === item.key
+      ? usage.activeStartedAt
+      : nowMs;
+    return item;
+  }
+
+  function stopProxyUsage(run, nowMs = Date.now()) {
+    const usage = ensureProxyUsageState(run);
+    if (!usage) {
+      return null;
+    }
+    addActiveProxyElapsed(run, nowMs);
+    usage.activeKey = "";
+    usage.activeStartedAt = null;
+    return usage;
+  }
+
+  function recordProxyDataLoaded(run, bytesLoaded, requestCount = 1) {
+    const usage = ensureProxyUsageState(run);
+    if (!usage?.activeKey) {
+      return null;
+    }
+    const item = usage.items[usage.activeKey];
+    if (!item) {
+      return null;
+    }
+    item.bytesLoaded = normalizeNonNegativeInteger(item.bytesLoaded) + normalizeNonNegativeInteger(bytesLoaded);
+    item.requestCount = normalizeNonNegativeInteger(item.requestCount) + normalizeNonNegativeInteger(requestCount);
+    return item;
+  }
+
+  function snapshotProxyUsage(run, nowMs = Date.now()) {
+    const usage = ensureProxyUsageState(run);
+    if (!usage) {
+      return { lineItems: [] };
+    }
+
+    const items = Object.values(usage.items).map((item) => ({ ...item }));
+    if (usage.activeKey && Number.isFinite(Number(usage.activeStartedAt))) {
+      const activeItem = items.find((item) => item.key === usage.activeKey);
+      if (activeItem) {
+        activeItem.proxyActiveMs += Math.max(normalizeNonNegativeInteger(nowMs - Number(usage.activeStartedAt)), 0);
+      }
+    }
+
+    return {
+      lineItems: items
+        .filter((item) => item.bytesLoaded || item.requestCount || item.proxyActiveMs)
+        .map(({ key: _key, ...item }) => item)
+    };
   }
 
   function cloneOutputRow(row) {
@@ -218,6 +372,10 @@ const runLifecycleHelpers = (() => {
     shouldRefreshProxyAfterStepFailure,
     incrementPendingProxyOperations,
     decrementPendingProxyOperations,
+    startProxyUsage,
+    stopProxyUsage,
+    recordProxyDataLoaded,
+    snapshotProxyUsage,
     trimOutputTables,
     appendRowsToOutputPreview,
     shouldProcessExecutionResult,

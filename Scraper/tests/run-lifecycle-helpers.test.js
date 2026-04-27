@@ -10,6 +10,10 @@ const {
   shouldRefreshProxyAfterStepFailure,
   incrementPendingProxyOperations,
   decrementPendingProxyOperations,
+  startProxyUsage,
+  stopProxyUsage,
+  recordProxyDataLoaded,
+  snapshotProxyUsage,
   trimOutputTables,
   appendRowsToOutputPreview,
   shouldProcessExecutionResult,
@@ -66,6 +70,41 @@ test("shouldRefreshProxyAfterStepFailure only refreshes active proxies for retry
   assert.equal(shouldRefreshProxyAfterStepFailure({ ...run, activeProxy: null }, { willRetry: true }), false);
   assert.equal(shouldRefreshProxyAfterStepFailure({ ...run, status: "FAILED" }, { willRetry: true }), false);
   assert.equal(shouldRefreshProxyAfterStepFailure(null, { willRetry: true }), false);
+});
+
+test("proxy usage aggregates data and active duration by proxy source", () => {
+  const run = {};
+
+  startProxyUsage(run, { type: "portalTag", tag: "RESI_LT" }, 1000);
+  recordProxyDataLoaded(run, 2048, 1);
+  recordProxyDataLoaded(run, 1024, 2);
+
+  assert.deepEqual(snapshotProxyUsage(run, 2500), {
+    lineItems: [{
+      sourceType: "portalTag",
+      proxyTag: "RESI_LT",
+      label: "RESI_LT",
+      bytesLoaded: 3072,
+      requestCount: 3,
+      proxyActiveMs: 1500
+    }]
+  });
+
+  stopProxyUsage(run, 3000);
+  assert.deepEqual(snapshotProxyUsage(run, 4000).lineItems[0], {
+    sourceType: "portalTag",
+    proxyTag: "RESI_LT",
+    label: "RESI_LT",
+    bytesLoaded: 3072,
+    requestCount: 3,
+    proxyActiveMs: 2000
+  });
+});
+
+test("proxy usage ignores network data while no proxy is active", () => {
+  const run = {};
+  assert.equal(recordProxyDataLoaded(run, 1024, 1), null);
+  assert.deepEqual(snapshotProxyUsage(run), { lineItems: [] });
 });
 
 test("shouldProcessExecutionResult accepts only the live running run with a matching token", () => {

@@ -196,6 +196,28 @@ export async function appendRunOutputInPortal(run, tableName, rows, options = {}
   }
 }
 
+export async function updateRunCostInPortal(run, usage = {}) {
+  if (!run?.id) {
+    return null;
+  }
+
+  const lineItems = Array.isArray(usage.lineItems) ? usage.lineItems : [];
+  if (!lineItems.length) {
+    return null;
+  }
+
+  try {
+    const data = await portalFetch(`/api/runs/${encodeURIComponent(run.id)}/cost`, {
+      method: "PUT",
+      body: JSON.stringify({ lineItems })
+    });
+    return data.cost || null;
+  } catch (error) {
+    console.warn("[portal-sync] updateRunCostInPortal failed:", error.message);
+    return null;
+  }
+}
+
 export async function discardRunOutputForStepInPortal(run, stepId) {
   if (!run?.id || !stepId) {
     return false;

@@ -4,6 +4,7 @@ import {
   updateRunInPortal,
   appendRunOutputInPortal,
   discardRunOutputForStepInPortal,
+  updateRunCostInPortal,
   updateRunResumeStateInPortal,
   fetchRunResumeStateFromPortal,
   fetchRobotsFromPortal,
@@ -34,6 +35,10 @@ const {
   shouldRefreshProxyAfterStepFailure,
   incrementPendingProxyOperations,
   decrementPendingProxyOperations,
+  startProxyUsage,
+  stopProxyUsage,
+  recordProxyDataLoaded,
+  snapshotProxyUsage,
   trimOutputTables,
   appendRowsToOutputPreview,
   shouldProcessExecutionResult,
@@ -162,6 +167,8 @@ const uiPorts = new Set();
 const runTimers = new Map();
 const portalResumeTimers = new Map();
 const proxyRotationTimers = new Map();
+const runCostTimers = new Map();
+const networkTrackedTabs = new Map();
 let persistTimer = null;
 let uiDisconnectAbortTimer = null;
 let userScriptWorldReady = null;
@@ -239,6 +246,26 @@ if (chrome.webRequest?.onAuthRequired?.addListener) {
     { urls: ["<all_urls>"] },
     ["blocking"]
   );
+}
+
+if (chrome.debugger?.onEvent?.addListener) {
+  chrome.debugger.onEvent.addListener((source, method, params) => {
+    if (method !== "Network.loadingFinished" || !Number.isInteger(source?.tabId)) {
+      return;
+    }
+
+    void withReady(async () => {
+      recordNetworkUsage(source.tabId, params?.encodedDataLength);
+    });
+  });
+}
+
+if (chrome.debugger?.onDetach?.addListener) {
+  chrome.debugger.onDetach.addListener((source) => {
+    if (Number.isInteger(source?.tabId)) {
+      networkTrackedTabs.delete(source.tabId);
+    }
+  });
 }
 
 const legacyServices = {
@@ -929,6 +956,9 @@ function hydrateRun(run) {
     storedVisitedUrlCount: Number.isFinite(Number(run.visitedUrlCount)) ? Number(run.visitedUrlCount) : null,
     resumable: run.resumable !== false,
     code: typeof run.code === "string" ? run.code : DEFAULT_SCRIPT,
+    proxyUsage: isObject(run.proxyUsage)
+      ? clone(run.proxyUsage)
+      : { items: {}, activeKey: "", activeStartedAt: null },
     tabId: Number.isInteger(run.tabId) ? run.tabId : null,
     updatedAt: run.updatedAt || new Date().toISOString(),
     executionToken: null,
@@ -1252,6 +1282,7 @@ async function resumeRun(runId) {
     rows: snapshot.rows || 0,
     visitedUrls: snapshot.visitedUrls || [],
     visitedMap: snapshot.visitedMap || {},
+    proxyUsage: snapshot.proxyUsage || { items: {}, activeKey: "", activeStartedAt: null },
     code: snapshot.code || DEFAULT_SCRIPT
   });
 
@@ -1551,6 +1582,45 @@ async function setUserAgent(tabId, userAgent) {
   appendLog(run, `User-Agent override applied: ${userAgent}`, "INFO");
 }
 
+async function ensureNetworkTracking(run) {
+  if (!run?.tabId || !run.activeProxy || networkTrackedTabs.get(run.tabId) === run.id) {
+    return false;
+  }
+
+  const target = { tabId: run.tabId };
+  try {
+    await chrome.debugger.attach(target, "1.3");
+  } catch (_error) {
+    // The tab may already be attached by this extension for UA override. Try
+    // enabling the Network domain before deciding tracking is unavailable.
+  }
+
+  try {
+    await chrome.debugger.sendCommand(target, "Network.enable");
+    networkTrackedTabs.set(run.tabId, run.id);
+    return true;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    appendLog(run, `Could not enable network usage tracking: ${detail}`, "WARN");
+    return false;
+  }
+}
+
+function recordNetworkUsage(tabId, encodedDataLength) {
+  const run = findRunByTabId(tabId);
+  if (!isRunningRun(run) || !run.activeProxy) {
+    return false;
+  }
+
+  const item = recordProxyDataLoaded(run, encodedDataLength, 1);
+  if (!item) {
+    return false;
+  }
+
+  scheduleRunCostPersist(run);
+  return true;
+}
+
 function updateRunConfig(tabId, settings) {
   const run = findRunByTabId(tabId);
 
@@ -1727,11 +1797,14 @@ function scheduleProxyRotation(tabId, source) {
   }
 
   run.activeProxy = clone(source);
+  startProxyUsage(run, source);
+  void ensureNetworkTracking(run);
   armProxyRotationTimer(run);
   appendLog(run, `Proxy auto-rotation enabled every ${AUTO_PROXY_ROTATE_INTERVAL_MS / 60_000} minute(s).`, "INFO");
   updateSnapshot(run);
   schedulePersist();
   schedulePortalResumePersist(run);
+  scheduleRunCostPersist(run, 1000);
   broadcastState();
   return true;
 }
@@ -1760,10 +1833,12 @@ function clearProxyRotationForRun(run) {
   }
 
   clearProxyRotationTimer(run.id);
+  stopProxyUsage(run);
   run.activeProxy = null;
   updateSnapshot(run);
   schedulePersist();
   schedulePortalResumePersist(run);
+  scheduleRunCostPersist(run, 1000);
   broadcastState();
   return true;
 }
@@ -2129,27 +2204,32 @@ async function dispatchNextStep(run) {
 
   if (!run.tabId) {
     const tab = await chrome.tabs.create({
-      url: nextStep.url,
+      url: "about:blank",
       active: true
     });
     run.tabId = tab.id;
     runtime.lastPageTabId = tab.id;
+    await ensureNetworkTracking(run);
+    await chrome.tabs.update(run.tabId, { url: nextStep.url });
     schedulePersist();
     broadcastState();
     return;
   }
 
+  await ensureNetworkTracking(run);
   const updatedTab = await chrome.tabs.update(run.tabId, {
     url: nextStep.url
   }).catch(() => null);
 
   if (!updatedTab?.id) {
     const tab = await chrome.tabs.create({
-      url: nextStep.url,
+      url: "about:blank",
       active: true
     });
     run.tabId = tab.id;
     runtime.lastPageTabId = tab.id;
+    await ensureNetworkTracking(run);
+    await chrome.tabs.update(run.tabId, { url: nextStep.url });
     schedulePersist();
     broadcastState();
   }
@@ -2279,6 +2359,7 @@ async function finishRun(run, status) {
   const hadActiveProxy = Boolean(run.activeProxy);
   clearRunTimer(run.id);
   clearProxyRotationTimer(run.id);
+  stopProxyUsage(run);
   run.executionToken = null;
   run.currentStepOutputCheckpoint = null;
   run.activeProxy = null;
@@ -2298,6 +2379,7 @@ async function finishRun(run, status) {
   schedulePersist();
   broadcastState();
   await flushPortalResumePersist(run);
+  await flushRunCostPersist(run);
   void updateRunInPortal(run);
 }
 
@@ -2348,7 +2430,8 @@ function updateSnapshot(run) {
     visitedUrlCount,
     visitedMap: resumable ? clone(run.visitedMap) : {},
     resumable,
-    code: run.code
+    code: run.code,
+    proxyUsage: clone(run.proxyUsage || { items: {}, activeKey: "", activeStartedAt: null })
   };
 }
 
@@ -2473,6 +2556,25 @@ function schedulePortalResumePersist(run, delayMs = 500) {
   }, delayMs));
 }
 
+function scheduleRunCostPersist(run, delayMs = 10_000) {
+  if (!run?.id) {
+    return;
+  }
+
+  const existingTimer = runCostTimers.get(run.id);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+  }
+
+  runCostTimers.set(run.id, setTimeout(() => {
+    runCostTimers.delete(run.id);
+    const liveRun = runtime.runs[run.id];
+    if (liveRun === run) {
+      void updateRunCostInPortal(run, snapshotProxyUsage(run));
+    }
+  }, delayMs));
+}
+
 async function flushPortalResumePersist(run) {
   if (!run?.id) {
     return;
@@ -2485,6 +2587,24 @@ async function flushPortalResumePersist(run) {
   }
 
   await updateRunResumeStateInPortal(run);
+}
+
+async function flushRunCostPersist(run) {
+  if (!run?.id) {
+    return null;
+  }
+
+  const existingTimer = runCostTimers.get(run.id);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    runCostTimers.delete(run.id);
+  }
+
+  const usage = snapshotProxyUsage(run);
+  if (!usage.lineItems.length) {
+    return null;
+  }
+  return updateRunCostInPortal(run, usage);
 }
 
 async function persistState() {
@@ -2550,6 +2670,7 @@ function serializeRun(run) {
     visitedMap: resumable ? run.visitedMap : {},
     resumable,
     code: run.code,
+    proxyUsage: clone(run.proxyUsage || { items: {}, activeKey: "", activeStartedAt: null }),
     tabId: run.tabId,
     updatedAt: run.updatedAt
   };
