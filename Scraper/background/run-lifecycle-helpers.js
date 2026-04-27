@@ -30,6 +30,23 @@ const runLifecycleHelpers = (() => {
       && Boolean(willRetry);
   }
 
+  function resolveStepFailureAction({ fatal = false, nextAttempt = 0, failures = 0, retries = {} } = {}) {
+    const attemptCount = normalizeNonNegativeInteger(nextAttempt);
+    const failureCount = normalizeNonNegativeInteger(failures);
+    const maxStep = normalizeNonNegativeInteger(retries.maxStep);
+    const maxRun = normalizeNonNegativeInteger(retries.maxRun);
+
+    if (fatal || (maxRun > 0 && failureCount >= maxRun)) {
+      return "failRun";
+    }
+
+    if (maxStep > 0 && attemptCount < maxStep) {
+      return "retry";
+    }
+
+    return "skipStep";
+  }
+
   function incrementPendingProxyOperations(run) {
     if (!run || typeof run !== "object") {
       return 0;
@@ -378,11 +395,20 @@ const runLifecycleHelpers = (() => {
     return step?.method === "openUrl";
   }
 
+  function dropPairedExecutionStepAfterOpenUrlFailure(queue, failedStep) {
+    if (!isOpenUrlStep(failedStep) || !Array.isArray(queue) || !queue.length) {
+      return null;
+    }
+
+    return queue.pop() || null;
+  }
+
   return {
     isRunningRun,
     getPendingProxyOperationCount,
     hasPendingProxyOperations,
     shouldRefreshProxyAfterStepFailure,
+    resolveStepFailureAction,
     incrementPendingProxyOperations,
     decrementPendingProxyOperations,
     startProxyUsage,
@@ -399,7 +425,8 @@ const runLifecycleHelpers = (() => {
     describeBlockedPageStepFailure,
     BLOCKED_PAGE_FAILURE_OPTIONS,
     createLegacyQueueEntries,
-    isOpenUrlStep
+    isOpenUrlStep,
+    dropPairedExecutionStepAfterOpenUrlFailure
   };
 })();
 

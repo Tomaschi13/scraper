@@ -33,6 +33,7 @@ const {
   isRunningRun,
   hasPendingProxyOperations,
   shouldRefreshProxyAfterStepFailure,
+  resolveStepFailureAction,
   incrementPendingProxyOperations,
   decrementPendingProxyOperations,
   startProxyUsage,
@@ -49,7 +50,8 @@ const {
   describeBlockedPageStepFailure,
   BLOCKED_PAGE_FAILURE_OPTIONS,
   createLegacyQueueEntries,
-  isOpenUrlStep
+  isOpenUrlStep,
+  dropPairedExecutionStepAfterOpenUrlFailure
 } = globalThis.ScraperRunLifecycleHelpers;
 
 const {
@@ -2331,9 +2333,13 @@ async function retryOrFailRun(run, step, { fatal = false } = {}) {
   run.currentStep = null;
   run.phase = RUN_STATUS.idle;
 
-  const willRetry = !fatal
-    && nextAttempt < run.retries.maxStep
-    && run.failures < run.retries.maxRun;
+  const failureAction = resolveStepFailureAction({
+    fatal,
+    nextAttempt,
+    failures: run.failures,
+    retries: run.retries
+  });
+  const willRetry = failureAction === "retry";
 
   if (willRetry) {
     run.queue.push(updatedStep);
@@ -2357,7 +2363,24 @@ async function retryOrFailRun(run, step, { fatal = false } = {}) {
     return;
   }
 
-  appendLog(run, `Too many failures for step ${describeStep(updatedStep)}. Marking run as failed.`, "ERROR");
+  if (failureAction === "skipStep") {
+    const pairedStep = dropPairedExecutionStepAfterOpenUrlFailure(run.queue, updatedStep);
+
+    appendLog(run, `Too many retries for step ${describeStep(updatedStep)}. Skipping failed step and continuing.`, "WARN");
+
+    if (pairedStep) {
+      appendLog(run, `Skipping paired step ${describeStep(pairedStep)} after failed openUrl.`, "WARN");
+    }
+
+    updateSnapshot(run);
+    schedulePersist();
+    schedulePortalResumePersist(run);
+    broadcastState();
+    await dispatchNextStep(run);
+    return;
+  }
+
+  appendLog(run, `Too many retries for robot. Marking run as failed.`, "ERROR");
   await finishRun(run, RUN_STATUS.failed);
 }
 

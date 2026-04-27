@@ -8,6 +8,7 @@ const {
   getPendingProxyOperationCount,
   hasPendingProxyOperations,
   shouldRefreshProxyAfterStepFailure,
+  resolveStepFailureAction,
   incrementPendingProxyOperations,
   decrementPendingProxyOperations,
   startProxyUsage,
@@ -24,7 +25,8 @@ const {
   describeBlockedPageStepFailure,
   BLOCKED_PAGE_FAILURE_OPTIONS,
   createLegacyQueueEntries,
-  isOpenUrlStep
+  isOpenUrlStep,
+  dropPairedExecutionStepAfterOpenUrlFailure
 } = require("../background/run-lifecycle-helpers.js");
 
 test("isRunningRun returns true only for active runs", () => {
@@ -100,6 +102,39 @@ test("shouldRefreshProxyAfterStepFailure only refreshes active proxies for retry
   assert.equal(shouldRefreshProxyAfterStepFailure({ ...run, activeProxy: null }, { willRetry: true }), false);
   assert.equal(shouldRefreshProxyAfterStepFailure({ ...run, status: "FAILED" }, { willRetry: true }), false);
   assert.equal(shouldRefreshProxyAfterStepFailure(null, { willRetry: true }), false);
+});
+
+test("resolveStepFailureAction mirrors legacy retry, skip, then robot-fail behavior", () => {
+  const retries = {
+    intervalMs: 90000,
+    maxStep: 2,
+    maxRun: 500
+  };
+
+  assert.equal(resolveStepFailureAction({
+    nextAttempt: 1,
+    failures: 1,
+    retries
+  }), "retry");
+
+  assert.equal(resolveStepFailureAction({
+    nextAttempt: 2,
+    failures: 2,
+    retries
+  }), "skipStep");
+
+  assert.equal(resolveStepFailureAction({
+    nextAttempt: 1,
+    failures: 500,
+    retries
+  }), "failRun");
+
+  assert.equal(resolveStepFailureAction({
+    fatal: true,
+    nextAttempt: 1,
+    failures: 1,
+    retries
+  }), "failRun");
 });
 
 test("proxy usage aggregates data and active duration by proxy source", () => {
@@ -336,6 +371,37 @@ test("createLegacyQueueEntries splits URL steps into execute then openUrl entrie
     }
   ]);
   assert.equal(isOpenUrlStep(entries[1]), true);
+});
+
+test("dropPairedExecutionStepAfterOpenUrlFailure mirrors legacy openUrl skip behavior", () => {
+  const queue = [
+    { id: "unrelated", step: "next_product", url: "" },
+    { id: "paired_execute", step: "product", url: "" }
+  ];
+  const dropped = dropPairedExecutionStepAfterOpenUrlFailure(queue, {
+    id: "failed_open",
+    method: "openUrl",
+    url: "https://example.com/p/1"
+  });
+
+  assert.deepEqual(dropped, { id: "paired_execute", step: "product", url: "" });
+  assert.deepEqual(queue, [{ id: "unrelated", step: "next_product", url: "" }]);
+  assert.equal(dropPairedExecutionStepAfterOpenUrlFailure(queue, {
+    id: "failed_execute",
+    step: "product",
+    url: ""
+  }), null);
+});
+
+test("dropPairedExecutionStepAfterOpenUrlFailure ignores empty and invalid queues", () => {
+  assert.equal(dropPairedExecutionStepAfterOpenUrlFailure([], {
+    method: "openUrl",
+    url: "https://example.com/p/1"
+  }), null);
+  assert.equal(dropPairedExecutionStepAfterOpenUrlFailure(null, {
+    method: "openUrl",
+    url: "https://example.com/p/1"
+  }), null);
 });
 
 test("createLegacyQueueEntries keeps empty-url and gofast steps execute-only", () => {
