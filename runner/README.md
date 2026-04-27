@@ -24,6 +24,8 @@ Useful options:
 
 - `--headed` or `--headless`
 - `--portal-origin https://portal.example.com`
+- `--proxy-server socks5://127.0.0.1:1080`
+- `--proxy-bypass api.internal.test`
 - `--user-data-dir /path/to/profile`
 - `--start-url https://example.com`
 - `--step start`
@@ -31,6 +33,12 @@ Useful options:
 - `--config-json '{"skipVisited":true}'`
 
 If `--portal-origin` is omitted, the runner falls back to `http://127.0.0.1:5077`.
+When `--proxy-server` is set, the runner automatically bypasses that proxy for
+the portal origin plus loopback hosts (`127.0.0.1`, `localhost`, `::1`) so
+portal login and run-state sync stay on the control-plane connection. Any
+entries supplied through `--proxy-bypass` or `RUNNER_PROXY_BYPASS` are preserved
+and merged with those defaults.
+
 
 ## Important notes
 

@@ -131,19 +131,44 @@ test("buildProxyConfig prefixes bare host:port with http:// and carries auth + b
     "proxy-username": "user",
     "proxy-password": "secret",
     "proxy-bypass": "127.0.0.1,localhost"
+  }, {
+    portalOrigin: "https://portal.example.com"
   });
 
   assert.deepEqual(result, {
     server: "http://proxy.example.com:8080",
     username: "user",
     password: "secret",
-    bypass: "127.0.0.1,localhost"
+    bypass: "127.0.0.1,localhost,portal.example.com,::1"
   });
+});
+
+test("buildProxyConfig automatically bypasses the portal origin for control-plane traffic", () => {
+  const result = buildProxyConfig({
+    "proxy-server": "socks5://127.0.0.1:1080"
+  }, {
+    portalOrigin: "http://178.104.237.206:5077"
+  });
+
+  assert.equal(result.server, "socks5://127.0.0.1:1080");
+  assert.equal(result.bypass, "178.104.237.206,127.0.0.1,localhost,::1");
+});
+
+test("buildProxyConfig keeps loopback bypasses when the portal origin is malformed", () => {
+  const result = buildProxyConfig({
+    "proxy-server": "proxy.example.com:8080",
+    "proxy-bypass": "api.internal.test"
+  }, {
+    portalOrigin: "not a url"
+  });
+
+  assert.equal(result.bypass, "api.internal.test,127.0.0.1,localhost,::1");
 });
 
 test("buildProxyConfig preserves explicit schemes like socks5", () => {
   const result = buildProxyConfig({ "proxy-server": "socks5://10.0.0.1:1080" });
   assert.equal(result.server, "socks5://10.0.0.1:1080");
+  assert.equal(result.bypass, "127.0.0.1,localhost,::1");
   assert.ok(!("username" in result));
 });
 

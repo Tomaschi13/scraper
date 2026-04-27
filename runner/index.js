@@ -45,6 +45,11 @@ const STEALTH_EXTRA_HEADERS = {
   "Sec-CH-UA-Mobile": "?0",
   "Sec-CH-UA-Platform": "\"macOS\""
 };
+const CONTROL_PLANE_PROXY_BYPASS_HOSTS = [
+  "127.0.0.1",
+  "localhost",
+  "::1"
+];
 
 // In-house stealth payload. Mirrors the evasions from
 // puppeteer-extra-plugin-stealth without the plugin's chrome.tabs-breaking
@@ -526,7 +531,7 @@ function usage() {
     "  --proxy-server       Upstream proxy, e.g. http://host:port or socks5://host:port",
     "  --proxy-username     Proxy auth username (optional)",
     "  --proxy-password     Proxy auth password (optional)",
-    "  --proxy-bypass       Comma-separated bypass list, e.g. 127.0.0.1,localhost",
+    "  --proxy-bypass       Additional comma-separated proxy bypass list",
     "  --headless           Run Chromium headless",
     "  --headed             Run Chromium headed (recommended first with Xvfb on servers)",
     "  --poll-interval-ms   Run status polling interval. Default: 2000",
@@ -537,9 +542,10 @@ function usage() {
 function buildConfig(options) {
   const robotId = String(options["robot-id"] || process.env.ROBOT_ID || "").trim();
   const profileSuffix = robotId ? robotId.replace(/[^a-zA-Z0-9_-]+/g, "-") : "default";
+  const portalOrigin = normalizePortalOrigin(options["portal-origin"] || process.env.PORTAL_ORIGIN);
 
   return {
-    portalOrigin: normalizePortalOrigin(options["portal-origin"] || process.env.PORTAL_ORIGIN),
+    portalOrigin,
     email: String(options.email || process.env.PORTAL_EMAIL || "").trim(),
     password: String(options.password || process.env.PORTAL_PASSWORD || ""),
     robotId,
@@ -571,11 +577,61 @@ function buildConfig(options) {
         || process.env.RUNNER_BROWSER_CHANNEL
         || "chromium"
     ).trim() || "chromium",
-    proxy: buildProxyConfig(options)
+    proxy: buildProxyConfig(options, { portalOrigin })
   };
 }
 
-function buildProxyConfig(options) {
+function normalizeProxyBypassHost(value) {
+  return String(value || "").trim().replace(/^\[|\]$/g, "");
+}
+
+function addProxyBypassEntry(entries, seen, value) {
+  const entry = normalizeProxyBypassHost(value);
+  if (!entry) {
+    return;
+  }
+
+  const key = entry.toLowerCase();
+  if (seen.has(key)) {
+    return;
+  }
+
+  seen.add(key);
+  entries.push(entry);
+}
+
+function getPortalProxyBypassHosts(portalOrigin) {
+  const hosts = [];
+
+  try {
+    const parsed = new URL(portalOrigin);
+    const hostname = normalizeProxyBypassHost(parsed.hostname);
+    if (hostname) {
+      hosts.push(hostname);
+    }
+  } catch (_error) {
+    // Invalid portal origins are normalized elsewhere; keep the fallback hosts.
+  }
+
+  hosts.push(...CONTROL_PLANE_PROXY_BYPASS_HOSTS);
+  return hosts;
+}
+
+function buildProxyBypassList(explicitBypass, portalOrigin) {
+  const entries = [];
+  const seen = new Set();
+
+  String(explicitBypass || "")
+    .split(",")
+    .forEach((entry) => addProxyBypassEntry(entries, seen, entry));
+
+  getPortalProxyBypassHosts(portalOrigin)
+    .forEach((entry) => addProxyBypassEntry(entries, seen, entry));
+
+  return entries.join(",");
+}
+
+function buildProxyConfig(options, { portalOrigin = "" } = {}) {
   const server = String(options["proxy-server"] || process.env.RUNNER_PROXY_SERVER || "").trim();
   if (!server) {
     return null;
@@ -584,7 +640,10 @@ function buildProxyConfig(options) {
   const normalizedServer = /^[a-z][a-z0-9+.-]*:\/\//i.test(server) ? server : `http://${server}`;
   const username = String(options["proxy-username"] || process.env.RUNNER_PROXY_USERNAME || "").trim();
   const password = String(options["proxy-password"] || process.env.RUNNER_PROXY_PASSWORD || "");
-  const bypass = String(options["proxy-bypass"] || process.env.RUNNER_PROXY_BYPASS || "").trim();
+  const bypass = buildProxyBypassList(
+    options["proxy-bypass"] || process.env.RUNNER_PROXY_BYPASS,
+    portalOrigin
+  );
 
   const config = { server: normalizedServer };
   if (username) {
