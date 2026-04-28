@@ -16,9 +16,13 @@ const {
   describeProxy,
   installAggressiveResourceBlocker,
   invalidateExtensionScriptCacheIfStale,
+  loadEgressHistory,
+  recordEgressIp,
   resolveRobotStartUrl,
+  resolveStealthIdentity,
   seedExtensionPreferences,
   shouldBlockRequestForBandwidth,
+  STEALTH_LAUNCH_ARGS,
   waitForRunnablePage
 } = require("../index.js");
 
@@ -425,4 +429,110 @@ test("graceful shutdown closes Chromium context only once across repeated reques
   assert.equal(closeCount, 1);
   assert.equal(fakeProcess.exitCode, 143);
   assert.deepEqual(fakeProcess.exitCalls, [143]);
+});
+
+test("STEALTH_LAUNCH_ARGS includes WebRTC IP-leak prevention flags", () => {
+  assert.ok(STEALTH_LAUNCH_ARGS.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"));
+  assert.ok(STEALTH_LAUNCH_ARGS.includes("--enforce-webrtc-ip-permission-check"));
+});
+
+test("resolveStealthIdentity prefers explicit overrides over everything else", () => {
+  const result = resolveStealthIdentity({
+    probe: { countryCode: "DE", timezone: "Europe/Berlin" },
+    override: { locale: "ja-JP", timezone: "Asia/Tokyo" },
+    autoGeo: true
+  });
+  assert.deepEqual(result, { locale: "ja-JP", timezone: "Asia/Tokyo", source: "override" });
+});
+
+test("resolveStealthIdentity derives locale from proxy country when auto-geo is on", () => {
+  const result = resolveStealthIdentity({
+    probe: { countryCode: "LT", timezone: "Europe/Vilnius" },
+    override: {},
+    autoGeo: true
+  });
+  assert.deepEqual(result, { locale: "lt-LT", timezone: "Europe/Vilnius", source: "proxy-geo" });
+});
+
+test("resolveStealthIdentity falls back to en-US for countries missing from the locale map", () => {
+  const result = resolveStealthIdentity({
+    probe: { countryCode: "ZZ", timezone: "Etc/UTC" },
+    override: {},
+    autoGeo: true
+  });
+  assert.equal(result.locale, "en-US");
+  assert.equal(result.timezone, "Etc/UTC");
+  assert.equal(result.source, "proxy-geo");
+});
+
+test("resolveStealthIdentity uses module defaults when auto-geo is off", () => {
+  const result = resolveStealthIdentity({
+    probe: { countryCode: "DE", timezone: "Europe/Berlin" },
+    override: {},
+    autoGeo: false
+  });
+  assert.deepEqual(result, { locale: "en-US", timezone: "Europe/Vilnius", source: "default" });
+});
+
+test("resolveStealthIdentity uses module defaults when probe failed even with auto-geo on", () => {
+  const result = resolveStealthIdentity({ probe: null, override: {}, autoGeo: true });
+  assert.deepEqual(result, { locale: "en-US", timezone: "Europe/Vilnius", source: "default" });
+});
+
+test("resolveStealthIdentity merges a partial override with proxy-geo", () => {
+  const result = resolveStealthIdentity({
+    probe: { countryCode: "DE", timezone: "Europe/Berlin" },
+    override: { locale: "en-US", timezone: "" },
+    autoGeo: true
+  });
+  assert.equal(result.locale, "en-US");
+  assert.equal(result.timezone, "Europe/Berlin");
+  assert.equal(result.source, "override+proxy-geo");
+});
+
+test("recordEgressIp persists a ring of recent IPs and detects repeats", () => {
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "runner-egress-"));
+
+  const first = recordEgressIp(userDataDir, "203.0.113.10", { now: () => "2026-04-28T10:00:00.000Z" });
+  assert.equal(first.repeated, false);
+  assert.equal(first.recorded, true);
+
+  const second = recordEgressIp(userDataDir, "203.0.113.20", { now: () => "2026-04-28T10:05:00.000Z" });
+  assert.equal(second.repeated, false);
+
+  const repeat = recordEgressIp(userDataDir, "203.0.113.10", { now: () => "2026-04-28T10:10:00.000Z" });
+  assert.equal(repeat.repeated, true, "an IP we already saw must be flagged as repeated");
+
+  const history = loadEgressHistory(userDataDir);
+  assert.equal(history.length, 3);
+  assert.deepEqual(history.map((entry) => entry.ip), ["203.0.113.10", "203.0.113.20", "203.0.113.10"]);
+});
+
+test("recordEgressIp evicts the oldest entries once the ring is full", () => {
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "runner-egress-ring-"));
+
+  for (let index = 0; index < 12; index += 1) {
+    recordEgressIp(userDataDir, `203.0.113.${index}`);
+  }
+
+  const history = loadEgressHistory(userDataDir);
+  assert.equal(history.length, 10, "ring should be capped at 10 entries");
+  assert.equal(history[0].ip, "203.0.113.2", "oldest entries should have been evicted");
+  assert.equal(history[9].ip, "203.0.113.11");
+});
+
+test("recordEgressIp returns recorded=false and skips writing when ip is empty", () => {
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "runner-egress-empty-"));
+  const result = recordEgressIp(userDataDir, "");
+  assert.equal(result.repeated, false);
+  assert.equal(result.recorded, false);
+  assert.deepEqual(loadEgressHistory(userDataDir), []);
+});
+
+test("loadEgressHistory returns an empty list when the file is missing or corrupt", () => {
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "runner-egress-corrupt-"));
+  assert.deepEqual(loadEgressHistory(userDataDir), []);
+
+  fs.writeFileSync(path.join(userDataDir, ".scraper-egress-history.json"), "{not json");
+  assert.deepEqual(loadEgressHistory(userDataDir), []);
 });
