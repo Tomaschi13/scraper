@@ -888,6 +888,10 @@ async function run() {
       headless: config.headless,
       locale: STEALTH_LOCALE,
       timezone: STEALTH_TIMEZONE,
+      // Patches page.click/dblclick/hover/type and page.mouse.* / page.keyboard.*
+      // with Bezier-curve cursor trajectories, typing jitter, and humanized
+      // scroll/click micro-timings — applied to every page in the context.
+      humanize: true,
       ...(config.proxy ? { proxy: config.proxy } : {}),
       args: [
         ...STEALTH_LAUNCH_ARGS,
