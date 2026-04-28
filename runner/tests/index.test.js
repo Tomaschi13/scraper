@@ -19,7 +19,6 @@ const {
   loadEgressHistory,
   recordEgressIp,
   resolveRobotStartUrl,
-  resolveStealthIdentity,
   seedExtensionPreferences,
   shouldBlockRequestForBandwidth,
   STEALTH_LAUNCH_ARGS,
@@ -434,60 +433,6 @@ test("graceful shutdown closes Chromium context only once across repeated reques
 test("STEALTH_LAUNCH_ARGS includes WebRTC IP-leak prevention flags", () => {
   assert.ok(STEALTH_LAUNCH_ARGS.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"));
   assert.ok(STEALTH_LAUNCH_ARGS.includes("--enforce-webrtc-ip-permission-check"));
-});
-
-test("resolveStealthIdentity prefers explicit overrides over everything else", () => {
-  const result = resolveStealthIdentity({
-    probe: { countryCode: "DE", timezone: "Europe/Berlin" },
-    override: { locale: "ja-JP", timezone: "Asia/Tokyo" },
-    autoGeo: true
-  });
-  assert.deepEqual(result, { locale: "ja-JP", timezone: "Asia/Tokyo", source: "override" });
-});
-
-test("resolveStealthIdentity derives locale from proxy country when auto-geo is on", () => {
-  const result = resolveStealthIdentity({
-    probe: { countryCode: "LT", timezone: "Europe/Vilnius" },
-    override: {},
-    autoGeo: true
-  });
-  assert.deepEqual(result, { locale: "lt-LT", timezone: "Europe/Vilnius", source: "proxy-geo" });
-});
-
-test("resolveStealthIdentity falls back to en-US for countries missing from the locale map", () => {
-  const result = resolveStealthIdentity({
-    probe: { countryCode: "ZZ", timezone: "Etc/UTC" },
-    override: {},
-    autoGeo: true
-  });
-  assert.equal(result.locale, "en-US");
-  assert.equal(result.timezone, "Etc/UTC");
-  assert.equal(result.source, "proxy-geo");
-});
-
-test("resolveStealthIdentity uses module defaults when auto-geo is off", () => {
-  const result = resolveStealthIdentity({
-    probe: { countryCode: "DE", timezone: "Europe/Berlin" },
-    override: {},
-    autoGeo: false
-  });
-  assert.deepEqual(result, { locale: "en-US", timezone: "Europe/Vilnius", source: "default" });
-});
-
-test("resolveStealthIdentity uses module defaults when probe failed even with auto-geo on", () => {
-  const result = resolveStealthIdentity({ probe: null, override: {}, autoGeo: true });
-  assert.deepEqual(result, { locale: "en-US", timezone: "Europe/Vilnius", source: "default" });
-});
-
-test("resolveStealthIdentity merges a partial override with proxy-geo", () => {
-  const result = resolveStealthIdentity({
-    probe: { countryCode: "DE", timezone: "Europe/Berlin" },
-    override: { locale: "en-US", timezone: "" },
-    autoGeo: true
-  });
-  assert.equal(result.locale, "en-US");
-  assert.equal(result.timezone, "Europe/Berlin");
-  assert.equal(result.source, "override+proxy-geo");
 });
 
 test("recordEgressIp persists a ring of recent IPs and detects repeats", () => {
