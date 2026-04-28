@@ -54,7 +54,6 @@ jobs:
       SCRAPER_DEPLOY_USER: deploy
       SCRAPER_DEPLOY_RUNNER_PATH: /opt/runner
       SCRAPER_DEPLOY_EXTENSION_PATH: /opt/Scraper
-      SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH: /opt/ms-playwright
       SCRAPER_DEPLOY_RESTART_COMMAND: sudo /usr/bin/systemctl restart scraper-portal
     steps:
       - name: Check out repository
@@ -86,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           ssh -p "$SCRAPER_DEPLOY_PORT" "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST" \
-            "mkdir -p $(printf '%q' "$SCRAPER_DEPLOY_RUNNER_PATH") $(printf '%q' "$SCRAPER_DEPLOY_EXTENSION_PATH") $(printf '%q' "$SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH")"
+            "mkdir -p $(printf '%q' "$SCRAPER_DEPLOY_RUNNER_PATH") $(printf '%q' "$SCRAPER_DEPLOY_EXTENSION_PATH")"
 
       - name: Sync runner to server
         run: |
@@ -118,4 +117,4 @@ jobs:
         run: |
           set -euo pipefail
           ssh -p "$SCRAPER_DEPLOY_PORT" "$SCRAPER_DEPLOY_USER@$SCRAPER_DEPLOY_HOST" \
-            "cd $(printf '%q' "$SCRAPER_DEPLOY_RUNNER_PATH") && PLAYWRIGHT_BROWSERS_PATH=$(printf '%q' "$SCRAPER_DEPLOY_PLAYWRIGHT_BROWSERS_PATH") RESTART_COMMAND=$(printf '%q' "$SCRAPER_DEPLOY_RESTART_COMMAND") bash scripts/deploy.sh"
+            "cd $(printf '%q' "$SCRAPER_DEPLOY_RUNNER_PATH") && RESTART_COMMAND=$(printf '%q' "$SCRAPER_DEPLOY_RESTART_COMMAND") bash scripts/deploy.sh"
