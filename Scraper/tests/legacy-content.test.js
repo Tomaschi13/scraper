@@ -15,7 +15,8 @@
 //   - done() delayed + abortStep gating (step aborted -> emitDbg WARN).
 //   - ensure() sets abortStep on missing selector.
 //   - setRetries, setUA, setSettings, setProxy (direct/tag/object), resetProxy.
-//   - allowImages, blockImages, clearQue, closeSocket, stop.
+//   - allowImages, blockImages, allowServerImages, blockServerImages,
+//     clearQue, closeSocket, stop.
 //   - getArray, take, captcha, screenshot, emitfb, emitBQ bqTable propagation.
 
 const test = require("node:test");
@@ -442,6 +443,8 @@ test("clearQue, closeSocket, stop, allowImages, blockImages send the matching pl
   harness.invoke("stop");
   harness.invoke("allowImages", { tab: 1 });
   harness.invoke("blockImages", { tab: 2 });
+  harness.invoke("allowServerImages", { reason: "captcha" });
+  harness.invoke("blockServerImages", { reason: "done" });
 
   for (const method of ["clearQue", "closeSocket", "stop"]) {
     assert.ok(harness.messages.find((message) => message.method === method), `expected ${method}`);
@@ -453,6 +456,14 @@ test("clearQue, closeSocket, stop, allowImages, blockImages send the matching pl
   assert.deepEqual(
     harness.messages.find((message) => message.method === "blockImages"),
     { method: "blockImages", parameters: { tab: 2 } }
+  );
+  assert.deepEqual(
+    harness.messages.find((message) => message.method === "allowServerImages"),
+    { method: "allowServerImages", parameters: { reason: "captcha" } }
+  );
+  assert.deepEqual(
+    harness.messages.find((message) => message.method === "blockServerImages"),
+    { method: "blockServerImages", parameters: { reason: "done" } }
   );
 });
 

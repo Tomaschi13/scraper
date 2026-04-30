@@ -169,6 +169,14 @@ const contentMessageRouter = (() => {
         await services.setImagesAllowed(false);
         return { ok: true };
 
+      case "allowServerImages":
+        await services.setServerImagesAllowed(tabId, true);
+        return { ok: true };
+
+      case "blockServerImages":
+        await services.setServerImagesAllowed(tabId, false);
+        return { ok: true };
+
       case "stop":
         await services.stopRunByTab(tabId);
         return { ok: true };

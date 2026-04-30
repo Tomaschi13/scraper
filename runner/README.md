@@ -39,6 +39,11 @@ portal login and run-state sync stay on the control-plane connection. Any
 entries supplied through `--proxy-bypass` or `RUNNER_PROXY_BYPASS` are preserved
 and merged with those defaults.
 
+Server runs block image loading by default before start-page warmup and robot
+execution. If a server robot needs images for a specific step, call
+`allowServerImages()` from the IDE script before the navigation or reload that
+needs them; call `blockServerImages()` to re-disable image loading afterward.
+Those helpers are no-ops for local extension runs.
 
 ## Important notes
 

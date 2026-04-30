@@ -27,6 +27,7 @@ function makeServicesSpy() {
       setProxyFromPortalTag: record("setProxyFromPortalTag"),
       resetProxySettings: record("resetProxySettings"),
       setImagesAllowed: record("setImagesAllowed"),
+      setServerImagesAllowed: record("setServerImagesAllowed"),
       clearCookies: record("clearCookies"),
       clearBrowsingData: record("clearBrowsingData"),
       onRuntimeReady: record("onRuntimeReady"),
@@ -266,6 +267,16 @@ test("dispatch allowImages and blockImages toggle setImagesAllowed", async () =>
   assert.deepEqual(spyB.calls[0], { name: "setImagesAllowed", args: [false] });
 });
 
+test("dispatch allowServerImages and blockServerImages toggle server-only image policy", async () => {
+  const spyA = makeServicesSpy();
+  await router.dispatchLegacyMethod({ method: "allowServerImages" }, spyA.services, sender);
+  assert.deepEqual(spyA.calls[0], { name: "setServerImagesAllowed", args: [42, true] });
+
+  const spyB = makeServicesSpy();
+  await router.dispatchLegacyMethod({ method: "blockServerImages" }, spyB.services, sender);
+  assert.deepEqual(spyB.calls[0], { name: "setServerImagesAllowed", args: [42, false] });
+});
+
 test("dispatch closeSocket is a no-op INFO log", async () => {
   const spy = makeServicesSpy();
   await router.dispatchLegacyMethod({ method: "closeSocket" }, spy.services, sender);
@@ -324,6 +335,7 @@ test("handleLegacyPayload catches per-message throws and records them without sh
     setProxyFromPortalTag() {},
     resetProxySettings() {},
     setImagesAllowed() {},
+    setServerImagesAllowed() {},
     clearCookies() {},
     clearBrowsingData() {},
     onRuntimeReady() {},

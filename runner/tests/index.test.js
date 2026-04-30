@@ -16,10 +16,12 @@ const {
   describeProxy,
   installAggressiveResourceBlocker,
   invalidateExtensionScriptCacheIfStale,
+  isServerImagesAllowed,
   loadEgressHistory,
   recordEgressIp,
   resolveRobotStartUrl,
   seedExtensionPreferences,
+  setServerImagesAllowedFlag,
   shouldBlockRequestForBandwidth,
   STEALTH_LAUNCH_ARGS,
   waitForRunnablePage
@@ -123,6 +125,117 @@ test("installAggressiveResourceBlocker registers a single context-wide route han
 
   assert.deepEqual(aborted, ["image"]);
   assert.deepEqual(continued, ["doc"]);
+});
+
+test("shouldBlockRequestForBandwidth allows first-party images when imagesAllowed is true", () => {
+  // Default behavior unchanged: images blocked when not explicitly allowed.
+  assert.equal(shouldBlockRequestForBandwidth("https://shop.example.com/banner.jpg", "image"), true);
+  assert.equal(
+    shouldBlockRequestForBandwidth("https://shop.example.com/banner.jpg", "image", { imagesAllowed: false }),
+    true
+  );
+
+  // With the flag flipped on, first-party image requests pass through.
+  assert.equal(
+    shouldBlockRequestForBandwidth("https://shop.example.com/banner.jpg", "image", { imagesAllowed: true }),
+    false
+  );
+});
+
+test("shouldBlockRequestForBandwidth still blocks media/font/stylesheet when imagesAllowed=true", () => {
+  // The toggle is image-only — bandwidth-heavy non-image resources should
+  // remain blocked. This guards against accidentally widening the toggle.
+  assert.equal(
+    shouldBlockRequestForBandwidth("https://shop.example.com/video.mp4", "media", { imagesAllowed: true }),
+    true
+  );
+  assert.equal(
+    shouldBlockRequestForBandwidth("https://shop.example.com/font.woff2", "font", { imagesAllowed: true }),
+    true
+  );
+  assert.equal(
+    shouldBlockRequestForBandwidth("https://shop.example.com/style.css", "stylesheet", { imagesAllowed: true }),
+    true
+  );
+});
+
+test("shouldBlockRequestForBandwidth still blocks analytics/ad image beacons when imagesAllowed=true", () => {
+  // Pixel beacons from analytics hosts must keep being blocked even after a
+  // robot script flips images on for content rendering — leaving them open
+  // would defeat the host-pattern allowlist's purpose.
+  assert.equal(
+    shouldBlockRequestForBandwidth("https://www.google-analytics.com/collect?v=1", "image", { imagesAllowed: true }),
+    true
+  );
+  assert.equal(
+    shouldBlockRequestForBandwidth("https://stats.g.doubleclick.net/p.gif", "image", { imagesAllowed: true }),
+    true
+  );
+});
+
+test("setServerImagesAllowedFlag toggles the runtime flag consulted by the route handler", async () => {
+  // Reset to a known state — the flag is module-scoped so other tests in
+  // this file run with the default.
+  setServerImagesAllowedFlag(false);
+  assert.equal(isServerImagesAllowed(), false);
+
+  setServerImagesAllowedFlag(true);
+  assert.equal(isServerImagesAllowed(), true);
+
+  // Coerces truthy/falsy values to booleans.
+  setServerImagesAllowedFlag(0);
+  assert.equal(isServerImagesAllowed(), false);
+  setServerImagesAllowedFlag("yes");
+  assert.equal(isServerImagesAllowed(), true);
+
+  setServerImagesAllowedFlag(false);
+});
+
+test("installAggressiveResourceBlocker route handler honors the live flag", async () => {
+  // The route handler reads serverImagesAllowed on every request, so flipping
+  // the flag mid-run must change subsequent decisions without reinstalling
+  // the handler. This is the contract that makes allowServerImages() actually
+  // work for a single navigation.
+  setServerImagesAllowedFlag(false);
+
+  const routes = [];
+  const fakeContext = {
+    async route(pattern, handler) {
+      routes.push({ pattern, handler });
+    }
+  };
+
+  await installAggressiveResourceBlocker(fakeContext);
+  const handler = routes[0].handler;
+
+  const events = [];
+  function imageRequest() {
+    return {
+      route: {
+        async abort() { events.push("abort"); },
+        async continue() { events.push("continue"); }
+      },
+      request: {
+        url: () => "https://shop.example.com/photo.jpg",
+        resourceType: () => "image"
+      }
+    };
+  }
+
+  let r = imageRequest();
+  await handler(r.route, r.request);
+
+  setServerImagesAllowedFlag(true);
+  r = imageRequest();
+  await handler(r.route, r.request);
+
+  setServerImagesAllowedFlag(false);
+  r = imageRequest();
+  await handler(r.route, r.request);
+
+  assert.deepEqual(events, ["abort", "continue", "abort"]);
+
+  setServerImagesAllowedFlag(false);
 });
 
 test("resolveRobotStartUrl prefers an explicit start-url override", () => {

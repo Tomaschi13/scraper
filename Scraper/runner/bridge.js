@@ -90,7 +90,40 @@ async function stopRun(runId) {
   });
 }
 
+async function allowImages() {
+  return request({ type: "ALLOW_IMAGES" });
+}
+
+async function blockImages() {
+  return request({ type: "BLOCK_IMAGES" });
+}
+
+// The Playwright runner installs __scraperRunnerOnImagesAllowedChanged via
+// page.exposeBinding before this page loads. The SW fires
+// RUNNER_IMAGES_ALLOWED_CHANGED whenever allowServerImages()/blockServerImages()
+// (or ALLOW_IMAGES/BLOCK_IMAGES) flips chrome.contentSettings.images, so we
+// just forward it through. When this page is opened by something other than
+// the runner (i.e. the extension is running locally), the binding is absent
+// and we silently skip.
+chrome.runtime.onMessage.addListener((message) => {
+  if (!message || message.type !== "RUNNER_IMAGES_ALLOWED_CHANGED") {
+    return;
+  }
+
+  const notify = globalThis.__scraperRunnerOnImagesAllowedChanged;
+  if (typeof notify === "function") {
+    try {
+      notify(Boolean(message.allowed));
+    } catch (_error) {
+      // The binding may be torn down mid-message during context shutdown;
+      // dropping the notification is fine because the runner is exiting.
+    }
+  }
+});
+
 globalThis.scraperRunnerBridge = {
+  allowImages,
+  blockImages,
   configurePortal,
   getPortalOrigin,
   getState,

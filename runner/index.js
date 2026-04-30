@@ -787,6 +787,14 @@ function getExtensionId(serviceWorker) {
 
 async function createBridgePage(context, extensionId) {
   const page = await context.newPage();
+  // Receives RUNNER_IMAGES_ALLOWED_CHANGED notifications forwarded by
+  // bridge.js. The Playwright route handler installed in
+  // installAggressiveResourceBlocker() consults serverImagesAllowed on every
+  // image request, so flipping the flag here is sufficient to honor
+  // allowServerImages()/blockServerImages() from the IDE script.
+  await page.exposeBinding("__scraperRunnerOnImagesAllowedChanged", (_source, allowed) => {
+    setServerImagesAllowedFlag(allowed);
+  });
   await page.goto(`chrome-extension://${extensionId}/runner/bridge.html`);
   await page.waitForFunction(() => Boolean(globalThis.scraperRunnerBridge));
   return page;
@@ -806,7 +814,22 @@ async function callBridge(page, method, payload) {
   });
 }
 
-function shouldBlockRequestForBandwidth(url, resourceType) {
+// Per-runner runtime toggle, flipped by allowServerImages()/blockServerImages()
+// from the IDE script. Lives at module scope because the runner owns exactly
+// one persistent context — there is no per-context fan-out to worry about.
+// Stays false until the SW notifies us via the bridge page binding installed
+// in createBridgePage().
+let serverImagesAllowed = false;
+
+function setServerImagesAllowedFlag(allowed) {
+  serverImagesAllowed = Boolean(allowed);
+}
+
+function isServerImagesAllowed() {
+  return serverImagesAllowed;
+}
+
+function shouldBlockRequestForBandwidth(url, resourceType, { imagesAllowed = false } = {}) {
   let parsed;
   try {
     parsed = new URL(url);
@@ -819,7 +842,12 @@ function shouldBlockRequestForBandwidth(url, resourceType) {
   }
 
   if (BLOCKED_RESOURCE_TYPES.has(resourceType)) {
-    return true;
+    if (resourceType === "image" && imagesAllowed) {
+      // fall through to the host-pattern check so analytics/ad image beacons
+      // can still be blocked even when images are temporarily allowed.
+    } else {
+      return true;
+    }
   }
 
   const hostname = parsed.hostname.toLowerCase();
@@ -829,7 +857,12 @@ function shouldBlockRequestForBandwidth(url, resourceType) {
 
 async function installAggressiveResourceBlocker(context) {
   await context.route("**/*", (route, request) => {
-    if (shouldBlockRequestForBandwidth(request.url(), request.resourceType())) {
+    const blocked = shouldBlockRequestForBandwidth(
+      request.url(),
+      request.resourceType(),
+      { imagesAllowed: serverImagesAllowed }
+    );
+    if (blocked) {
       route.abort().catch(() => { /* request already settled */ });
       return;
     }
@@ -1047,6 +1080,7 @@ async function run() {
       console.log(`Cleared stale Chromium script cache for extension ${seededExtensionId}.`);  // eslint-disable-line no-console
     }
 
+    setServerImagesAllowedFlag(false);
     context = await cb.launchPersistentContext({
       userDataDir: config.userDataDir,
       headless: config.headless,
@@ -1152,11 +1186,13 @@ module.exports = {
   describeProxy,
   installAggressiveResourceBlocker,
   invalidateExtensionScriptCacheIfStale,
+  isServerImagesAllowed,
   loadEgressHistory,
   recordEgressIp,
   seedExtensionPreferences,
   getRunFromState,
   resolveRobotStartUrl,
+  setServerImagesAllowedFlag,
   shouldBlockRequestForBandwidth,
   waitForRunnablePage,
   warmRobotStartUrl,

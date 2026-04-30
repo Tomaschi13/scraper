@@ -22,6 +22,7 @@ import "./content-message-router.js";
 import "./auth-prompt-helpers.js";
 import "./robot-record-helpers.js";
 import "./user-script-helpers.js";
+import "./runner-image-bridge-helpers.js";
 
 const {
   findRunById,
@@ -287,6 +288,7 @@ const legacyServices = {
   setProxyFromPortalTag: (tag, tabId) => setProxyFromPortalTag(tag, tabId),
   resetProxySettings: (tabId) => resetProxySettings(tabId),
   setImagesAllowed: (allowed) => setImagesAllowed(allowed),
+  setServerImagesAllowed: (tabId, allowed) => setServerImagesAllowed(tabId, allowed),
   clearCookies: (domain) => clearCookies(domain),
   clearBrowsingData: (origins, settings) => clearBrowsingData(origins, settings),
   onRuntimeReady: (tab, pageUrl) => onRuntimeReady(tab, pageUrl),
@@ -2045,6 +2047,34 @@ async function setImagesAllowed(allowed) {
     primaryPattern: "<all_urls>",
     setting: allowed ? "allow" : "block"
   });
+  // The Playwright runner aborts image requests at the CDP layer regardless of
+  // chrome.contentSettings.images, so notify the runner-side bridge page
+  // (Scraper/runner/bridge.js) which forwards into the runner process via a
+  // Playwright binding. For local runs the bridge page does not exist and the
+  // helper silently no-ops.
+  await globalThis.ScraperRunnerImageBridgeHelpers.notifyRunnerImagesAllowed(chrome.runtime, allowed);
+}
+
+async function setServerImagesAllowed(tabId, allowed) {
+  const run = findRunByTabId(tabId);
+  const helperName = allowed ? "allowServerImages()" : "blockServerImages()";
+
+  if (!isRunningRun(run)) {
+    return false;
+  }
+
+  if (run.runSource !== RUN_SOURCE.portalServer) {
+    appendLog(run, `${helperName} ignored because this is a local extension run.`, "INFO");
+    schedulePersist();
+    broadcastState();
+    return false;
+  }
+
+  await setImagesAllowed(allowed);
+  appendLog(run, `Server image loading ${allowed ? "allowed" : "blocked"}.`, "INFO");
+  schedulePersist();
+  broadcastState();
+  return true;
 }
 
 async function clearCookies(domain) {
