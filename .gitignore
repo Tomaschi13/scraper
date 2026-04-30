@@ -1,0 +1,23 @@
+# Secrets — must never be committed
+.portal_actions_deploy
+.portal_actions_deploy.pub
+*.pem
+id_rsa
+id_rsa.pub
+.env
+.env.*
+
+# OS clutter
+.DS_Store
+
+# Local tooling state
+.claude/
+
+# Local-only planning / context notes
+AGENTS.md
+NEXT_CHAT_CONTEXT.md
+REPO_SPLIT.md
+SERVER_RUNNER_PLAN.md
+
+# Dependencies
+node_modules/
