@@ -19,6 +19,7 @@ const RUN_SOURCE = {
 const DEFAULT_START_URL_WARMUP_TIMEOUT_MS = 45_000;
 const DEFAULT_START_URL_WARMUP_POLL_INTERVAL_MS = 750;
 const DEFAULT_START_URL_WARMUP_RELOAD_AFTER_MS = 12_000;
+const DEFAULT_RUN_STATUS_FALLBACK_INTERVAL_MS = 60_000;
 const PORTAL_AUTH_TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
 const PORTAL_AUTH_RENEWAL_LEAD_MS = 15 * 60 * 1000;
 const PORTAL_AUTH_RENEWAL_INTERVAL_MS = PORTAL_AUTH_TOKEN_TTL_MS - PORTAL_AUTH_RENEWAL_LEAD_MS;
@@ -430,7 +431,7 @@ function buildConfig(options) {
     ),
     pollIntervalMs: resolveInteger(
       options["poll-interval-ms"] || process.env.RUNNER_POLL_INTERVAL_MS,
-      2000
+      DEFAULT_RUN_STATUS_FALLBACK_INTERVAL_MS
     ),
     userDataDir: path.resolve(
       options["user-data-dir"]
@@ -1085,37 +1086,36 @@ async function warmRobotStartUrl(context, startUrl) {
   }
 }
 
-async function monitorRun(page, runId, intervalMs) {
+async function monitorRun(page, runId, intervalMs, {
+  callBridgeFn = callBridge,
+  logger = console
+} = {}) {
   let previousSummary = "";
-  let seenLogCount = 0;
+  const fallbackIntervalMs = Math.max(Number(intervalMs) || DEFAULT_RUN_STATUS_FALLBACK_INTERVAL_MS, 1000);
 
   for (;;) {
-    const response = await callBridge(page, "getState");
-    const run = getRunFromState(response?.state, runId);
+    const eventResponse = await callBridgeFn(page, "waitForRunTerminal", {
+      runId,
+      timeoutMs: fallbackIntervalMs
+    });
+    const statusResponse = eventResponse?.run
+      ? eventResponse
+      : await callBridgeFn(page, "getRunStatus", { runId });
+    const run = statusResponse?.run || null;
 
     if (!run) {
-      throw new Error(`Run ${runId} is no longer visible in extension state.`);
-    }
-
-    if (Array.isArray(run.logs) && run.logs.length > seenLogCount) {
-      const nextLogs = run.logs.slice(seenLogCount);
-      for (const entry of nextLogs) {
-        console.log(entry);  // eslint-disable-line no-console
-      }
-      seenLogCount = run.logs.length;
+      throw new Error(`Run ${runId} is no longer visible in extension status.`);
     }
 
     const summary = `[run ${run.id}] status=${run.status} phase=${run.phase} queue=${run.queueLength} rows=${run.rows} emits=${run.emits} failures=${run.failures}`;
     if (summary !== previousSummary) {
-      console.log(summary);  // eslint-disable-line no-console
+      logger.log(summary);  // eslint-disable-line no-console
       previousSummary = summary;
     }
 
     if (run.status !== "RUNNING") {
       return run;
     }
-
-    await page.waitForTimeout(intervalMs);
   }
 }
 
@@ -1293,6 +1293,7 @@ module.exports = {
   invalidateExtensionScriptCacheIfStale,
   isServerImagesAllowed,
   loadEgressHistory,
+  monitorRun,
   recordEgressIp,
   seedExtensionPreferences,
   getRunFromState,
@@ -1304,5 +1305,6 @@ module.exports = {
   PORTAL_AUTH_RENEWAL_INTERVAL_MS,
   PORTAL_AUTH_RENEWAL_RETRY_MS,
   PORTAL_AUTH_TOKEN_TTL_MS,
+  DEFAULT_RUN_STATUS_FALLBACK_INTERVAL_MS,
   STEALTH_LAUNCH_ARGS
 };

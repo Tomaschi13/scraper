@@ -312,6 +312,33 @@ const runLifecycleHelpers = (() => {
     return tables;
   }
 
+  function summarizeRunnerRunStatus(run) {
+    if (!run || typeof run !== "object") {
+      return null;
+    }
+
+    const queueLength = Number.isFinite(Number(run.queueLength))
+      ? Number(run.queueLength)
+      : (Array.isArray(run.queue) ? run.queue.length : 0);
+
+    return {
+      id: run.id || "",
+      robotId: run.robotId || "",
+      robotName: run.robotName || "",
+      status: run.status || "",
+      phase: run.phase || "",
+      currentUrl: run.currentUrl || "",
+      startedAt: run.startedAt || null,
+      finishedAt: run.finishedAt || null,
+      updatedAt: run.updatedAt || null,
+      queueLength,
+      failures: Number.isFinite(Number(run.failures)) ? Number(run.failures) : 0,
+      emits: Number.isFinite(Number(run.emits)) ? Number(run.emits) : 0,
+      rows: Number.isFinite(Number(run.rows)) ? Number(run.rows) : 0,
+      runSource: run.runSource || ""
+    };
+  }
+
   function shouldProcessExecutionResult(runtimeState, run, executionToken) {
     if (!runtimeState?.runs || !run || !executionToken) {
       return false;
@@ -469,6 +496,7 @@ const runLifecycleHelpers = (() => {
     snapshotProxyUsage,
     trimOutputTables,
     appendRowsToOutputPreview,
+    summarizeRunnerRunStatus,
     shouldProcessExecutionResult,
     createStepOutputCheckpoint,
     rollbackStepOutput,

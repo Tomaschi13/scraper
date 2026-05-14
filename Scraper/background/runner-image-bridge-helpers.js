@@ -19,8 +19,26 @@ const runnerImageBridgeHelpers = (() => {
     }
   }
 
+  async function notifyRunnerRunTerminal(runtime, run) {
+    if (!runtime || typeof runtime.sendMessage !== "function" || !run?.id) {
+      return;
+    }
+
+    try {
+      await runtime.sendMessage({
+        type: "RUNNER_RUN_TERMINAL",
+        run
+      });
+    } catch (_error) {
+      // No bridge page is open for local extension runs, and the runner may
+      // already be exiting. The portal has already received its own final run
+      // update before this notification is sent.
+    }
+  }
+
   return {
-    notifyRunnerImagesAllowed
+    notifyRunnerImagesAllowed,
+    notifyRunnerRunTerminal
   };
 })();
 

@@ -4,6 +4,8 @@ import {
 } from "../shared/portal-config.js";
 
 const AUTH_STORAGE_KEY = "scraper.auth";
+const TERMINAL_RUN_STATUSES = new Set(["FINISHED", "FAILED", "ABORTED"]);
+const terminalRunWaiters = new Map();
 
 async function request(message) {
   const response = await chrome.runtime.sendMessage(message);
@@ -72,6 +74,97 @@ async function getState() {
   return request({ type: "GET_STATE" });
 }
 
+async function getRunStatus({ runId } = {}) {
+  return request({
+    type: "GET_RUN_STATUS",
+    runId
+  });
+}
+
+function isTerminalRunStatus(status) {
+  return TERMINAL_RUN_STATUSES.has(String(status || "").toUpperCase());
+}
+
+function resolveTerminalRunWaiters(run) {
+  const runId = String(run?.id || "");
+  if (!runId || !isTerminalRunStatus(run?.status)) {
+    return;
+  }
+
+  const waiters = terminalRunWaiters.get(runId);
+  if (!waiters) {
+    return;
+  }
+
+  terminalRunWaiters.delete(runId);
+  waiters.forEach((resolve) => resolve(run));
+}
+
+async function waitForRunTerminal({ runId, timeoutMs = 60_000 } = {}) {
+  const cleanRunId = String(runId || "").trim();
+  if (!cleanRunId) {
+    throw new Error("runId is required.");
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    let resolveTerminal = null;
+    const waiters = terminalRunWaiters.get(cleanRunId) || [];
+    const cleanup = () => {
+      const nextWaiters = terminalRunWaiters.get(cleanRunId);
+      if (!nextWaiters) {
+        return;
+      }
+
+      const index = nextWaiters.indexOf(resolveTerminal);
+      if (index !== -1) {
+        nextWaiters.splice(index, 1);
+      }
+
+      if (!nextWaiters.length) {
+        terminalRunWaiters.delete(cleanRunId);
+      }
+    };
+    const finish = (payload) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      resolve(payload);
+    };
+    const fail = (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      cleanup();
+      reject(error);
+    };
+    resolveTerminal = (run) => {
+      finish({ ok: true, run, timedOut: false });
+    };
+    const delay = Math.max(Number(timeoutMs) || 0, 1);
+    timer = setTimeout(() => {
+      finish({ ok: true, run: null, timedOut: true });
+    }, delay);
+
+    waiters.push(resolveTerminal);
+    terminalRunWaiters.set(cleanRunId, waiters);
+
+    getRunStatus({ runId: cleanRunId })
+      .then((response) => {
+        if (isTerminalRunStatus(response?.run?.status)) {
+          finish({ ok: true, run: response.run, timedOut: false });
+        }
+      })
+      .catch(fail);
+  });
+}
+
 async function refreshRobots() {
   return request({ type: "REFRESH_PORTAL_ROBOTS" });
 }
@@ -106,18 +199,25 @@ async function blockImages() {
 // the runner (i.e. the extension is running locally), the binding is absent
 // and we silently skip.
 chrome.runtime.onMessage.addListener((message) => {
-  if (!message || message.type !== "RUNNER_IMAGES_ALLOWED_CHANGED") {
+  if (!message) {
     return;
   }
 
-  const notify = globalThis.__scraperRunnerOnImagesAllowedChanged;
-  if (typeof notify === "function") {
-    try {
-      notify(Boolean(message.allowed));
-    } catch (_error) {
-      // The binding may be torn down mid-message during context shutdown;
-      // dropping the notification is fine because the runner is exiting.
+  if (message.type === "RUNNER_IMAGES_ALLOWED_CHANGED") {
+    const notify = globalThis.__scraperRunnerOnImagesAllowedChanged;
+    if (typeof notify === "function") {
+      try {
+        notify(Boolean(message.allowed));
+      } catch (_error) {
+        // The binding may be torn down mid-message during context shutdown;
+        // dropping the notification is fine because the runner is exiting.
+      }
     }
+    return;
+  }
+
+  if (message.type === "RUNNER_RUN_TERMINAL") {
+    resolveTerminalRunWaiters(message.run);
   }
 });
 
@@ -126,9 +226,11 @@ globalThis.scraperRunnerBridge = {
   blockImages,
   configurePortal,
   getPortalOrigin,
+  getRunStatus,
   getState,
   login,
   refreshRobots,
   startRun,
-  stopRun
+  stopRun,
+  waitForRunTerminal
 };

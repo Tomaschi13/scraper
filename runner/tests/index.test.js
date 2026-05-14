@@ -19,11 +19,13 @@ const {
   invalidateExtensionScriptCacheIfStale,
   isServerImagesAllowed,
   loadEgressHistory,
+  monitorRun,
   recordEgressIp,
   resolveRobotStartUrl,
   seedExtensionPreferences,
   setServerImagesAllowedFlag,
   shouldBlockRequestForBandwidth,
+  DEFAULT_RUN_STATUS_FALLBACK_INTERVAL_MS,
   PORTAL_AUTH_RENEWAL_INTERVAL_MS,
   PORTAL_AUTH_RENEWAL_RETRY_MS,
   PORTAL_AUTH_TOKEN_TTL_MS,
@@ -351,6 +353,89 @@ test("waitForRunnablePage throws when the challenge never clears", async () => {
     timeoutMs: 0,
     pollIntervalMs: 1
   }), /Timed out waiting for the start page to clear/);
+});
+
+test("monitorRun resolves from terminal bridge event without polling full UI state", async () => {
+  const calls = [];
+  const logLines = [];
+  const finalRun = {
+    id: "run_1",
+    status: "FINISHED",
+    phase: "IDLE",
+    queueLength: 0,
+    rows: 10,
+    emits: 10,
+    failures: 0
+  };
+
+  const result = await monitorRun({}, "run_1", 60_000, {
+    async callBridgeFn(_page, method, payload) {
+      calls.push({ method, payload });
+      assert.notEqual(method, "getState");
+      assert.equal(method, "waitForRunTerminal");
+      return { ok: true, run: finalRun, timedOut: false };
+    },
+    logger: {
+      log(message) {
+        logLines.push(message);
+      }
+    }
+  });
+
+  assert.equal(result, finalRun);
+  assert.deepEqual(calls, [{
+    method: "waitForRunTerminal",
+    payload: { runId: "run_1", timeoutMs: 60_000 }
+  }]);
+  assert.deepEqual(logLines, ["[run run_1] status=FINISHED phase=IDLE queue=0 rows=10 emits=10 failures=0"]);
+});
+
+test("monitorRun uses tiny status fallback when no terminal event arrives", async () => {
+  const calls = [];
+  const statuses = [
+    {
+      id: "run_1",
+      status: "RUNNING",
+      phase: "EXECUTING",
+      queueLength: 2,
+      rows: 5,
+      emits: 5,
+      failures: 0
+    },
+    {
+      id: "run_1",
+      status: "ABORTED",
+      phase: "IDLE",
+      queueLength: 2,
+      rows: 5,
+      emits: 5,
+      failures: 1
+    }
+  ];
+
+  const result = await monitorRun({}, "run_1", 0, {
+    async callBridgeFn(_page, method, payload) {
+      calls.push({ method, payload });
+      assert.notEqual(method, "getState");
+      if (method === "waitForRunTerminal") {
+        return { ok: true, run: null, timedOut: true };
+      }
+      if (method === "getRunStatus") {
+        return { ok: true, run: statuses.shift() };
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+    logger: { log() {} }
+  });
+
+  assert.equal(result.status, "ABORTED");
+  assert.deepEqual(calls.map((call) => call.method), [
+    "waitForRunTerminal",
+    "getRunStatus",
+    "waitForRunTerminal",
+    "getRunStatus"
+  ]);
+  assert.equal(calls[0].payload.timeoutMs, DEFAULT_RUN_STATUS_FALLBACK_INTERVAL_MS);
 });
 
 test("buildProxyConfig returns null when no proxy is configured", () => {

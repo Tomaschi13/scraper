@@ -18,6 +18,7 @@ const {
   snapshotProxyUsage,
   trimOutputTables,
   appendRowsToOutputPreview,
+  summarizeRunnerRunStatus,
   shouldProcessExecutionResult,
   createStepOutputCheckpoint,
   rollbackStepOutput,
@@ -268,6 +269,45 @@ test("trimOutputTables creates a bounded copy for persistence", () => {
     emptyish: []
   });
   assert.equal(original.products[1].sku, "B");
+});
+
+test("summarizeRunnerRunStatus returns only the lean runner fields", () => {
+  const summary = summarizeRunnerRunStatus({
+    id: "run_1",
+    robotId: "robot_1",
+    robotName: "Example",
+    status: "RUNNING",
+    phase: "EXECUTING",
+    currentUrl: "https://example.com/product",
+    startedAt: "2026-05-14T10:00:00.000Z",
+    updatedAt: "2026-05-14T10:01:00.000Z",
+    queue: [{ id: "step_1" }],
+    failures: "2",
+    emits: 3,
+    rows: 4,
+    runSource: "PORTAL_SERVER",
+    logs: ["must not leak"],
+    outputTables: { products: [{ sku: "must not leak" }] },
+    currentStep: { params: { huge: true } },
+    code: "must not leak"
+  });
+
+  assert.deepEqual(summary, {
+    id: "run_1",
+    robotId: "robot_1",
+    robotName: "Example",
+    status: "RUNNING",
+    phase: "EXECUTING",
+    currentUrl: "https://example.com/product",
+    startedAt: "2026-05-14T10:00:00.000Z",
+    finishedAt: null,
+    updatedAt: "2026-05-14T10:01:00.000Z",
+    queueLength: 1,
+    failures: 2,
+    emits: 3,
+    rows: 4,
+    runSource: "PORTAL_SERVER"
+  });
 });
 
 test("createStepOutputCheckpoint snapshots current table lengths and counters", () => {

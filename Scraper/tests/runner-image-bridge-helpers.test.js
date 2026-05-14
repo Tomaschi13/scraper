@@ -3,7 +3,10 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { notifyRunnerImagesAllowed } = require("../background/runner-image-bridge-helpers.js");
+const {
+  notifyRunnerImagesAllowed,
+  notifyRunnerRunTerminal
+} = require("../background/runner-image-bridge-helpers.js");
 
 function makeRuntime({ throws = null } = {}) {
   const calls = [];
@@ -48,4 +51,30 @@ test("notifyRunnerImagesAllowed is a no-op when the runtime or sendMessage is mi
   await assert.doesNotReject(() => notifyRunnerImagesAllowed(null, true));
   await assert.doesNotReject(() => notifyRunnerImagesAllowed({}, true));
   await assert.doesNotReject(() => notifyRunnerImagesAllowed({ sendMessage: "not-a-function" }, true));
+});
+
+test("notifyRunnerRunTerminal dispatches the lean terminal run status", async () => {
+  const fake = makeRuntime();
+  const run = {
+    id: "run_1",
+    status: "FINISHED",
+    rows: 10
+  };
+
+  await notifyRunnerRunTerminal(fake.runtime, run);
+
+  assert.deepEqual(fake.calls, [{
+    type: "RUNNER_RUN_TERMINAL",
+    run
+  }]);
+});
+
+test("notifyRunnerRunTerminal is a no-op without a run id or receiver", async () => {
+  const fake = makeRuntime();
+
+  await assert.doesNotReject(() => notifyRunnerRunTerminal(fake.runtime, null));
+  await assert.doesNotReject(() => notifyRunnerRunTerminal(fake.runtime, { status: "FINISHED" }));
+  await assert.doesNotReject(() => notifyRunnerRunTerminal(null, { id: "run_1" }));
+
+  assert.equal(fake.calls.length, 0);
 });

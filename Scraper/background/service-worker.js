@@ -44,6 +44,7 @@ const {
   snapshotProxyUsage,
   trimOutputTables,
   appendRowsToOutputPreview,
+  summarizeRunnerRunStatus,
   shouldProcessExecutionResult,
   createStepOutputCheckpoint,
   rollbackStepOutput,
@@ -694,6 +695,13 @@ async function handleMessage(message, sender) {
   switch (message.type) {
     case "GET_STATE":
       return { ok: true, state: buildUiState() };
+    case "GET_RUN_STATUS": {
+      const run = findRunById(Object.values(runtime.runs), message.runId);
+      if (!run) {
+        return { ok: false, error: `Run not found: ${message.runId || ""}` };
+      }
+      return { ok: true, run: summarizeRunnerRunStatus(run) };
+    }
     case "REFRESH_PORTAL_ROBOTS": {
       const refreshed = await pullRobotsFromPortal();
       if (refreshed === null) {
@@ -2452,6 +2460,10 @@ async function finishRun(run, status) {
     schedulePersist();
     broadcastState();
   }
+  await globalThis.ScraperRunnerImageBridgeHelpers.notifyRunnerRunTerminal(
+    chrome.runtime,
+    summarizeRunnerRunStatus(run)
+  );
 }
 
 function updateSnapshot(run) {
