@@ -19,6 +19,10 @@ const RUN_SOURCE = {
 const DEFAULT_START_URL_WARMUP_TIMEOUT_MS = 45_000;
 const DEFAULT_START_URL_WARMUP_POLL_INTERVAL_MS = 750;
 const DEFAULT_START_URL_WARMUP_RELOAD_AFTER_MS = 12_000;
+const PORTAL_AUTH_TOKEN_TTL_MS = 8 * 60 * 60 * 1000;
+const PORTAL_AUTH_RENEWAL_LEAD_MS = 15 * 60 * 1000;
+const PORTAL_AUTH_RENEWAL_INTERVAL_MS = PORTAL_AUTH_TOKEN_TTL_MS - PORTAL_AUTH_RENEWAL_LEAD_MS;
+const PORTAL_AUTH_RENEWAL_RETRY_MS = 60 * 1000;
 const SIGNAL_EXIT_CODES = {
   SIGINT: 130,
   SIGTERM: 143
@@ -814,6 +818,94 @@ async function callBridge(page, method, payload) {
   });
 }
 
+function createPortalAuthRenewal({
+  page,
+  credentials,
+  intervalMs = PORTAL_AUTH_RENEWAL_INTERVAL_MS,
+  retryDelayMs = PORTAL_AUTH_RENEWAL_RETRY_MS,
+  callBridgeFn = callBridge,
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
+  logger = console
+} = {}) {
+  const cleanCredentials = {
+    email: String(credentials?.email || "").trim(),
+    password: String(credentials?.password || "")
+  };
+  let stopped = false;
+  let renewing = false;
+  let timer = null;
+
+  function clearTimer() {
+    if (timer) {
+      clearTimeoutFn(timer);
+      timer = null;
+    }
+  }
+
+  function schedule(delayMs) {
+    if (stopped) {
+      return;
+    }
+
+    clearTimer();
+    const parsedDelay = Number(delayMs);
+    const delay = Number.isFinite(parsedDelay) && parsedDelay > 0
+      ? Math.floor(parsedDelay)
+      : intervalMs;
+
+    timer = setTimeoutFn(() => {
+      timer = null;
+      return renew();
+    }, delay);
+
+    if (timer && typeof timer.unref === "function") {
+      timer.unref();
+    }
+  }
+
+  async function renew() {
+    if (stopped || renewing) {
+      return null;
+    }
+
+    renewing = true;
+    try {
+      const result = await callBridgeFn(page, "login", cleanCredentials);
+      const email = result?.user?.email || cleanCredentials.email;
+      if (logger && typeof logger.log === "function") {
+        logger.log(`Renewed portal auth for ${email}.`);
+      }
+      schedule(intervalMs);
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (logger && typeof logger.warn === "function") {
+        logger.warn(`Portal auth renewal failed; retrying in ${Math.round(retryDelayMs / 1000)}s: ${message}`);
+      }
+      schedule(retryDelayMs);
+      return null;
+    } finally {
+      renewing = false;
+    }
+  }
+
+  if (page && cleanCredentials.email && cleanCredentials.password) {
+    schedule(intervalMs);
+  }
+
+  return {
+    stop() {
+      stopped = true;
+      clearTimer();
+    },
+    renewNow: renew,
+    isActive() {
+      return !stopped && Boolean(page && cleanCredentials.email && cleanCredentials.password);
+    }
+  };
+}
+
 // Per-runner runtime toggle, flipped by allowServerImages()/blockServerImages()
 // from the IDE script. Lives at module scope because the runner owns exactly
 // one persistent context — there is no per-context fan-out to worry about.
@@ -1038,6 +1130,7 @@ async function run() {
   validateConfig(config);
 
   let context;
+  let authRenewal = null;
   const shutdown = createGracefulShutdownController();
   shutdown.install();
 
@@ -1115,6 +1208,14 @@ async function run() {
 
     console.log(`Authenticated as ${loginResult.user.email} against ${loginResult.portalOrigin}`);  // eslint-disable-line no-console
 
+    authRenewal = createPortalAuthRenewal({
+      page: bridgePage,
+      credentials: {
+        email: config.email,
+        password: config.password
+      }
+    });
+
     const refreshResult = await callBridge(bridgePage, "refreshRobots");
     const robotCount = Array.isArray(refreshResult?.state?.robots) ? refreshResult.state.robots.length : 0;
     console.log(`Loaded ${robotCount} robot(s) from the portal.`);  // eslint-disable-line no-console
@@ -1161,6 +1262,9 @@ async function run() {
       process.exitCode = 1;
     }
   } finally {
+    if (authRenewal) {
+      authRenewal.stop();
+    }
     await shutdown.closeContext("runner finish");
     shutdown.dispose();
   }
@@ -1182,6 +1286,7 @@ module.exports = {
   buildStartPayload,
   computeExtensionFingerprint,
   computeUnpackedExtensionId,
+  createPortalAuthRenewal,
   createGracefulShutdownController,
   describeProxy,
   installAggressiveResourceBlocker,
@@ -1196,5 +1301,8 @@ module.exports = {
   shouldBlockRequestForBandwidth,
   waitForRunnablePage,
   warmRobotStartUrl,
+  PORTAL_AUTH_RENEWAL_INTERVAL_MS,
+  PORTAL_AUTH_RENEWAL_RETRY_MS,
+  PORTAL_AUTH_TOKEN_TTL_MS,
   STEALTH_LAUNCH_ARGS
 };

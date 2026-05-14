@@ -12,6 +12,7 @@ const {
   buildProxyConfig,
   computeExtensionFingerprint,
   computeUnpackedExtensionId,
+  createPortalAuthRenewal,
   createGracefulShutdownController,
   describeProxy,
   installAggressiveResourceBlocker,
@@ -23,6 +24,9 @@ const {
   seedExtensionPreferences,
   setServerImagesAllowedFlag,
   shouldBlockRequestForBandwidth,
+  PORTAL_AUTH_RENEWAL_INTERVAL_MS,
+  PORTAL_AUTH_RENEWAL_RETRY_MS,
+  PORTAL_AUTH_TOKEN_TTL_MS,
   STEALTH_LAUNCH_ARGS,
   waitForRunnablePage
 } = require("../index.js");
@@ -54,6 +58,45 @@ function createFakeProcess() {
     emit: events.emit.bind(events),
     exit(code) {
       this.exitCalls.push(code);
+    }
+  };
+}
+
+function createFakeTimers() {
+  let nextId = 1;
+  const timers = [];
+
+  return {
+    timers,
+    setTimeout(fn, delay) {
+      const timer = {
+        id: nextId++,
+        async fn() {
+          this.cleared = true;
+          const index = timers.indexOf(this);
+          if (index !== -1) {
+            timers.splice(index, 1);
+          }
+          return fn();
+        },
+        delay,
+        cleared: false,
+        unrefCalled: false,
+        unref() {
+          this.unrefCalled = true;
+        }
+      };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout(timer) {
+      const index = timers.indexOf(timer);
+      if (index !== -1) {
+        timers.splice(index, 1);
+      }
+      if (timer) {
+        timer.cleared = true;
+      }
     }
   };
 }
@@ -372,6 +415,102 @@ test("describeProxy masks the password in log output", () => {
 
 test("describeProxy returns 'none' when no proxy is set", () => {
   assert.equal(describeProxy(null), "none");
+});
+
+test("createPortalAuthRenewal schedules re-login before the portal token expires", async () => {
+  const fakeTimers = createFakeTimers();
+  const calls = [];
+  const logs = [];
+  const page = {};
+  const credentials = { email: "runner@example.com", password: "secret" };
+
+  const renewal = createPortalAuthRenewal({
+    page,
+    credentials,
+    setTimeoutFn: fakeTimers.setTimeout,
+    clearTimeoutFn: fakeTimers.clearTimeout,
+    callBridgeFn: async (bridgePage, method, payload) => {
+      calls.push({ bridgePage, method, payload });
+      return { user: { email: payload.email } };
+    },
+    logger: { log: (line) => logs.push(line), warn: (line) => logs.push(line) }
+  });
+
+  assert.equal(renewal.isActive(), true);
+  assert.equal(PORTAL_AUTH_RENEWAL_INTERVAL_MS, PORTAL_AUTH_TOKEN_TTL_MS - (15 * 60 * 1000));
+  assert.equal(fakeTimers.timers.length, 1);
+  assert.equal(fakeTimers.timers[0].delay, PORTAL_AUTH_RENEWAL_INTERVAL_MS);
+  assert.equal(fakeTimers.timers[0].unrefCalled, true);
+
+  const scheduled = fakeTimers.timers[0];
+  await scheduled.fn();
+
+  assert.deepEqual(calls, [
+    {
+      bridgePage: page,
+      method: "login",
+      payload: credentials
+    }
+  ]);
+  assert.deepEqual(logs, ["Renewed portal auth for runner@example.com."]);
+  assert.equal(fakeTimers.timers.length, 1);
+  assert.equal(fakeTimers.timers[0].delay, PORTAL_AUTH_RENEWAL_INTERVAL_MS);
+
+  renewal.stop();
+});
+
+test("createPortalAuthRenewal retries quickly after a failed renewal", async () => {
+  const fakeTimers = createFakeTimers();
+  const warnings = [];
+  let attempts = 0;
+
+  const renewal = createPortalAuthRenewal({
+    page: {},
+    credentials: { email: "runner@example.com", password: "secret" },
+    setTimeoutFn: fakeTimers.setTimeout,
+    clearTimeoutFn: fakeTimers.clearTimeout,
+    callBridgeFn: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new Error("network down");
+      }
+      return { user: { email: "runner@example.com" } };
+    },
+    logger: { log() {}, warn: (line) => warnings.push(line) }
+  });
+
+  await fakeTimers.timers[0].fn();
+
+  assert.equal(attempts, 1);
+  assert.equal(fakeTimers.timers.length, 1);
+  assert.equal(fakeTimers.timers[0].delay, PORTAL_AUTH_RENEWAL_RETRY_MS);
+  assert.match(warnings[0], /Portal auth renewal failed; retrying in 60s: network down/);
+
+  await fakeTimers.timers[0].fn();
+
+  assert.equal(attempts, 2);
+  assert.equal(fakeTimers.timers.length, 1);
+  assert.equal(fakeTimers.timers[0].delay, PORTAL_AUTH_RENEWAL_INTERVAL_MS);
+
+  renewal.stop();
+});
+
+test("createPortalAuthRenewal stop clears the pending renewal timer", () => {
+  const fakeTimers = createFakeTimers();
+
+  const renewal = createPortalAuthRenewal({
+    page: {},
+    credentials: { email: "runner@example.com", password: "secret" },
+    setTimeoutFn: fakeTimers.setTimeout,
+    clearTimeoutFn: fakeTimers.clearTimeout,
+    callBridgeFn: async () => ({ user: { email: "runner@example.com" } }),
+    logger: { log() {}, warn() {} }
+  });
+
+  assert.equal(fakeTimers.timers.length, 1);
+  renewal.stop();
+  assert.equal(fakeTimers.timers.length, 0);
+  assert.equal(renewal.isActive(), false);
 });
 
 test("computeUnpackedExtensionId is deterministic and uses a-p alphabet", () => {
