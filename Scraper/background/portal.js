@@ -20,6 +20,9 @@ const RUN_SOURCE = {
   localExtension: "LOCAL_EXTENSION",
   portalServer: "PORTAL_SERVER"
 };
+const DEFAULT_PORTAL_FETCH_TIMEOUT_MS = 15_000;
+const PORTAL_SYNC_WARNING_MIN_INTERVAL_MS = 60_000;
+const portalSyncWarningTimes = new WeakMap();
 
 // Registered by the service worker; fired when a 401 is received.
 let authRequiredCallback = null;
@@ -49,16 +52,63 @@ export function setAuthRequiredCallback(cb) {
  * Adds Authorization header and handles 401 globally.
  */
 async function portalFetch(path, options = {}) {
+  const {
+    timeoutMs,
+    signal,
+    ...fetchOptions
+  } = options;
   const headers = {
     "Content-Type": "application/json",
     ...(options.headers || {})
   };
+  const resolvedTimeoutMs = resolvePortalFetchTimeoutMs(timeoutMs);
+  const controller = typeof AbortController !== "undefined"
+    ? new AbortController()
+    : null;
+  let didTimeout = false;
+  let timeoutId = null;
+  let abortListener = null;
 
   if (cachedToken) {
     headers["Authorization"] = `Bearer ${cachedToken}`;
   }
 
-  const response = await fetch(await portalUrl(path), { ...options, headers });
+  if (controller) {
+    timeoutId = setTimeout(() => {
+      didTimeout = true;
+      controller.abort();
+    }, resolvedTimeoutMs);
+
+    if (signal) {
+      abortListener = () => controller.abort(signal.reason);
+      if (signal.aborted) {
+        abortListener();
+      } else {
+        signal.addEventListener("abort", abortListener, { once: true });
+      }
+    }
+  }
+
+  let response;
+  try {
+    response = await fetch(await portalUrl(path), {
+      ...fetchOptions,
+      headers,
+      ...(controller ? { signal: controller.signal } : {})
+    });
+  } catch (error) {
+    if (didTimeout) {
+      throw createPortalTimeoutError(path, resolvedTimeoutMs);
+    }
+    throw error;
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    if (signal && abortListener) {
+      signal.removeEventListener("abort", abortListener);
+    }
+  }
 
   if (response.status === 401) {
     clearAuthToken();
@@ -89,6 +139,49 @@ async function portalFetch(path, options = {}) {
   }
 
   return response.json();
+}
+
+function resolvePortalFetchTimeoutMs(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.floor(parsed)
+    : DEFAULT_PORTAL_FETCH_TIMEOUT_MS;
+}
+
+function createPortalTimeoutError(path, timeoutMs) {
+  const error = new Error(`Portal ${path} timed out after ${timeoutMs}ms`);
+  error.status = 0;
+  error.code = "PORTAL_SYNC_TIMEOUT";
+  return error;
+}
+
+function recordPortalSyncFailure(run, operation, error) {
+  if (!run || typeof run !== "object") {
+    return;
+  }
+
+  if (!Array.isArray(run.logs)) {
+    run.logs = [];
+  }
+
+  const nowMs = Date.now();
+  let warningTimes = portalSyncWarningTimes.get(run);
+  if (!warningTimes) {
+    warningTimes = new Map();
+    portalSyncWarningTimes.set(run, warningTimes);
+  }
+
+  const lastWarningAt = warningTimes.get(operation) || 0;
+  if (nowMs - lastWarningAt < PORTAL_SYNC_WARNING_MIN_INTERVAL_MS) {
+    return;
+  }
+
+  warningTimes.set(operation, nowMs);
+  const detail = error?.message || String(error || "unknown error");
+  run.logs.push(`${new Date(nowMs).toISOString()} WARN: Portal sync failed while ${operation}: ${detail}`);
+  if (run.logs.length > 600) {
+    run.logs.splice(0, run.logs.length - 600);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +248,7 @@ export async function createRunInPortal(run) {
     });
     return data.run || null;
   } catch (error) {
+    recordPortalSyncFailure(run, "creating the run record", error);
     console.warn("[portal-sync] createRunInPortal failed:", error.message);
     return null;
   }
@@ -170,8 +264,11 @@ export async function updateRunInPortal(run) {
       method: "PUT",
       body: JSON.stringify(buildRunPayload(run))
     });
+    return true;
   } catch (error) {
+    recordPortalSyncFailure(run, "updating the run record", error);
     console.warn("[portal-sync] updateRunInPortal failed:", error.message);
+    return false;
   }
 }
 
@@ -191,6 +288,7 @@ export async function appendRunOutputInPortal(run, tableName, rows, options = {}
     });
     return data.chunk || null;
   } catch (error) {
+    recordPortalSyncFailure(run, "uploading run output", error);
     console.warn("[portal-sync] appendRunOutputInPortal failed:", error.message);
     return null;
   }
@@ -213,6 +311,7 @@ export async function updateRunCostInPortal(run, usage = {}) {
     });
     return data.cost || null;
   } catch (error) {
+    recordPortalSyncFailure(run, "updating run cost", error);
     console.warn("[portal-sync] updateRunCostInPortal failed:", error.message);
     return null;
   }
@@ -229,6 +328,7 @@ export async function discardRunOutputForStepInPortal(run, stepId) {
     });
     return true;
   } catch (error) {
+    recordPortalSyncFailure(run, "discarding failed step output", error);
     console.warn("[portal-sync] discardRunOutputForStepInPortal failed:", error.message);
     return false;
   }
@@ -263,6 +363,7 @@ export async function updateRunResumeStateInPortal(run) {
     });
     return data.resume || null;
   } catch (error) {
+    recordPortalSyncFailure(run, "saving resume state", error);
     console.warn("[portal-sync] updateRunResumeStateInPortal failed:", error.message);
     return null;
   }

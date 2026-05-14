@@ -37,6 +37,7 @@ const {
   resolveStepFailureAction,
   incrementPendingProxyOperations,
   decrementPendingProxyOperations,
+  withControlPlaneProxyBypass,
   startProxyUsage,
   stopProxyUsage,
   recordProxyDataLoaded,
@@ -1479,9 +1480,14 @@ async function emitRowsFromRuntime(tabId, tableName, rows) {
   schedulePersist();
   schedulePortalResumePersist(run);
   broadcastState();
-  await appendRunOutputInPortal(run, sanitizedName, emittedRows, {
+  const portalChunk = await appendRunOutputInPortal(run, sanitizedName, emittedRows, {
     stepId: run.currentStep?.id || null
   });
+  if (!portalChunk) {
+    updateSnapshot(run);
+    schedulePersist();
+    broadcastState();
+  }
   void updateRunInPortal(run);
   return true;
 }
@@ -1724,6 +1730,7 @@ async function applyNormalizedProxy(normalized) {
   currentProxyAuth = normalized.username
     ? { username: normalized.username, password: normalized.password || "" }
     : null;
+  const portalOrigin = await getPortalOrigin().catch(() => "");
 
   await chrome.proxy.settings.set({
     value: {
@@ -1734,7 +1741,7 @@ async function applyNormalizedProxy(normalized) {
           host: normalized.host,
           port: normalized.port
         },
-        bypassList: normalized.bypass
+        bypassList: withControlPlaneProxyBypass(normalized.bypass, portalOrigin)
       }
     },
     scope: "regular"
@@ -2439,7 +2446,12 @@ async function finishRun(run, status) {
   broadcastState();
   await flushPortalResumePersist(run);
   await flushRunCostPersist(run);
-  void updateRunInPortal(run);
+  const portalUpdated = await updateRunInPortal(run);
+  if (!portalUpdated) {
+    updateSnapshot(run);
+    schedulePersist();
+    broadcastState();
+  }
 }
 
 function updateSnapshot(run) {

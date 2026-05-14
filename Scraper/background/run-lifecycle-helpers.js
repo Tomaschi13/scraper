@@ -14,6 +14,57 @@ const runLifecycleHelpers = (() => {
     return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
   }
 
+  const CONTROL_PLANE_PROXY_BYPASS_HOSTS = Object.freeze([
+    "127.0.0.1",
+    "localhost",
+    "::1"
+  ]);
+
+  function normalizeProxyBypassEntry(value) {
+    return String(value || "").trim().replace(/^\[|\]$/g, "");
+  }
+
+  function addProxyBypassEntry(entries, seen, value) {
+    const entry = normalizeProxyBypassEntry(value);
+    if (!entry) {
+      return;
+    }
+
+    const key = entry.toLowerCase();
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    entries.push(entry);
+  }
+
+  function getPortalProxyBypassHost(portalOrigin) {
+    try {
+      return normalizeProxyBypassEntry(new URL(String(portalOrigin || "")).hostname);
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  function withControlPlaneProxyBypass(value, portalOrigin = "") {
+    const entries = [];
+    const seen = new Set();
+
+    if (Array.isArray(value)) {
+      value.forEach((entry) => addProxyBypassEntry(entries, seen, entry));
+    } else {
+      String(value || "")
+        .split(",")
+        .forEach((entry) => addProxyBypassEntry(entries, seen, entry));
+    }
+
+    addProxyBypassEntry(entries, seen, getPortalProxyBypassHost(portalOrigin));
+    CONTROL_PLANE_PROXY_BYPASS_HOSTS.forEach((entry) => addProxyBypassEntry(entries, seen, entry));
+
+    return entries;
+  }
+
   function getPendingProxyOperationCount(run) {
     const count = Number(run?.pendingProxyOperations);
     return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
@@ -411,6 +462,7 @@ const runLifecycleHelpers = (() => {
     resolveStepFailureAction,
     incrementPendingProxyOperations,
     decrementPendingProxyOperations,
+    withControlPlaneProxyBypass,
     startProxyUsage,
     stopProxyUsage,
     recordProxyDataLoaded,

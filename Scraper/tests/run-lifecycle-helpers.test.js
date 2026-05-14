@@ -11,6 +11,7 @@ const {
   resolveStepFailureAction,
   incrementPendingProxyOperations,
   decrementPendingProxyOperations,
+  withControlPlaneProxyBypass,
   startProxyUsage,
   stopProxyUsage,
   recordProxyDataLoaded,
@@ -28,6 +29,20 @@ const {
   isOpenUrlStep,
   dropPairedExecutionStepAfterOpenUrlFailure
 } = require("../background/run-lifecycle-helpers.js");
+
+test("withControlPlaneProxyBypass appends portal and loopback hosts", () => {
+  assert.deepEqual(
+    withControlPlaneProxyBypass([], "http://178.104.237.206:5077"),
+    ["178.104.237.206", "127.0.0.1", "localhost", "::1"]
+  );
+});
+
+test("withControlPlaneProxyBypass preserves custom bypasses and deduplicates case-insensitively", () => {
+  assert.deepEqual(
+    withControlPlaneProxyBypass("example.com, LOCALHOST, [::1]", "https://portal.example.com/app"),
+    ["example.com", "LOCALHOST", "::1", "portal.example.com", "127.0.0.1"]
+  );
+});
 
 test("isRunningRun returns true only for active runs", () => {
   assert.equal(isRunningRun({ status: "RUNNING" }), true);
