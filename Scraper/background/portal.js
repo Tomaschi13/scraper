@@ -342,24 +342,7 @@ export async function updateRunResumeStateInPortal(run) {
   try {
     const data = await portalFetch(`/api/runs/${encodeURIComponent(run.id)}/resume`, {
       method: "PUT",
-      body: JSON.stringify({
-        status: run.status || "RUNNING",
-        phase: run.phase || "IDLE",
-        currentUrl: run.currentUrl || "",
-        queue: Array.isArray(run.queue) ? run.queue : [],
-        visitedUrls: Array.isArray(run.visitedUrls) ? run.visitedUrls : [],
-        visitedMap: run.visitedMap && typeof run.visitedMap === "object" ? run.visitedMap : {},
-        currentStep: run.currentStep || null,
-        outputTables: run.outputTables || {},
-        code: run.code || "",
-        logs: Array.isArray(run.logs) ? run.logs.slice(-300) : [],
-        retries: run.retries || null,
-        config: run.config || null,
-        failures: run.failures || 0,
-        emits: run.emits || 0,
-        rows: run.rows || 0,
-        runSource: run.runSource || "LOCAL_EXTENSION"
-      })
+      body: JSON.stringify(buildRunResumePayload(run))
     });
     return data.resume || null;
   } catch (error) {
@@ -396,7 +379,19 @@ export async function fetchProxyFromPortal(tag) {
   return data.proxy || null;
 }
 
-function buildRunPayload(run) {
+function isPortalServerRun(run) {
+  return String(run?.runSource || "").trim().toUpperCase() === RUN_SOURCE.portalServer;
+}
+
+function runQueueLength(run) {
+  if (Array.isArray(run?.queue)) {
+    return run.queue.length;
+  }
+  const stored = Number(run?.queueLength);
+  return Number.isFinite(stored) && stored > 0 ? Math.floor(stored) : 0;
+}
+
+function buildRunSummaryPayload(run) {
   return {
     id: run.id,
     robotId: run.robotId,
@@ -408,17 +403,62 @@ function buildRunPayload(run) {
     currentUrl: run.currentUrl,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
-    logs: Array.isArray(run.logs) ? run.logs.slice(-300) : [],
-    outputTables: run.outputTables || {},
-    queueLength: run.queue ? run.queue.length : 0,
-    currentStep: run.currentStep || null,
+    queueLength: runQueueLength(run),
     failures: run.failures || 0,
     emits: run.emits || 0,
     rows: run.rows || 0,
-    retries: run.retries || null,
-    config: run.config || null,
     runSource: run.runSource === RUN_SOURCE.portalServer
       ? RUN_SOURCE.portalServer
       : RUN_SOURCE.localExtension
+  };
+}
+
+function buildRunDetailPayload(run) {
+  return {
+    ...buildRunSummaryPayload(run),
+    logs: Array.isArray(run.logs) ? run.logs.slice(-300) : [],
+    outputTables: run.outputTables || {},
+    currentStep: run.currentStep || null,
+    retries: run.retries || null,
+    config: run.config || null
+  };
+}
+
+function buildRunPayload(run) {
+  return isPortalServerRun(run)
+    ? buildRunSummaryPayload(run)
+    : buildRunDetailPayload(run);
+}
+
+function buildRunResumeHeartbeatPayload(run) {
+  return {
+    status: run.status || "RUNNING",
+    phase: run.phase || "IDLE",
+    currentUrl: run.currentUrl || "",
+    failures: run.failures || 0,
+    emits: run.emits || 0,
+    rows: run.rows || 0,
+    runSource: run.runSource === RUN_SOURCE.portalServer
+      ? RUN_SOURCE.portalServer
+      : RUN_SOURCE.localExtension
+  };
+}
+
+function buildRunResumePayload(run) {
+  if (isPortalServerRun(run)) {
+    return buildRunResumeHeartbeatPayload(run);
+  }
+
+  return {
+    ...buildRunResumeHeartbeatPayload(run),
+    queue: Array.isArray(run.queue) ? run.queue : [],
+    visitedUrls: Array.isArray(run.visitedUrls) ? run.visitedUrls : [],
+    visitedMap: run.visitedMap && typeof run.visitedMap === "object" ? run.visitedMap : {},
+    currentStep: run.currentStep || null,
+    outputTables: run.outputTables || {},
+    code: run.code || "",
+    logs: Array.isArray(run.logs) ? run.logs.slice(-300) : [],
+    retries: run.retries || null,
+    config: run.config || null
   };
 }

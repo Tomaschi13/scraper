@@ -133,6 +133,7 @@ const OUTPUT_PREVIEW_ROW_LIMIT = 250;
 const PERSISTED_OUTPUT_PREVIEW_ROW_LIMIT = 50;
 const PERSISTED_QUEUE_PREVIEW_LIMIT = 100;
 const PERSISTED_VISITED_URL_PREVIEW_LIMIT = 250;
+const SERVER_PORTAL_SYNC_INTERVAL_MS = 60 * 1000;
 const AUTO_PROXY_ROTATE_INTERVAL_MS = 10 * 60 * 1000;
 
 const DEFAULT_SCRIPT = `steps.start = function start() {
@@ -174,6 +175,7 @@ let loginTabId = null;
 const uiPorts = new Set();
 const runTimers = new Map();
 const portalResumeTimers = new Map();
+const portalRunSyncTimers = new Map();
 const proxyRotationTimers = new Map();
 const runCostTimers = new Map();
 const networkTrackedTabs = new Map();
@@ -912,6 +914,8 @@ function summarizeRun(run) {
     return null;
   }
 
+  const lean = isPortalServerRun(run);
+
   return {
     id: run.id,
     robotId: run.robotId,
@@ -923,15 +927,15 @@ function summarizeRun(run) {
     currentUrl: run.currentUrl,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
-    logs: run.logs.slice(-300),
-    outputTables: run.outputTables,
+    logs: lean ? [] : run.logs.slice(-300),
+    outputTables: lean ? {} : run.outputTables,
     queueLength: run.queue.length,
-    currentStep: run.currentStep,
+    currentStep: lean ? null : run.currentStep,
     failures: run.failures,
     emits: run.emits,
     rows: run.rows,
-    retries: run.retries,
-    config: run.config,
+    retries: lean ? null : run.retries,
+    config: lean ? null : run.config,
     runSource: run.runSource
   };
 }
@@ -984,6 +988,10 @@ function hydrateRun(run) {
   };
 }
 
+function isPortalServerRun(run) {
+  return run?.runSource === RUN_SOURCE.portalServer;
+}
+
 function getLocalRobot(robotId) {
   return robots.find((robot) => robot.id === robotId) || null;
 }
@@ -1007,6 +1015,7 @@ async function purgeRobotState(robotId) {
     }
 
     clearRunTimer(runId);
+    clearPortalRunSync(runId);
     clearProxyRotationTimer(runId);
     if (run.tabId) {
       await chrome.debugger.detach({ tabId: run.tabId }).catch(() => null);
@@ -1496,7 +1505,11 @@ async function emitRowsFromRuntime(tabId, tableName, rows) {
     schedulePersist();
     broadcastState();
   }
-  void updateRunInPortal(run);
+  if (isPortalServerRun(run)) {
+    schedulePortalRunSync(run);
+  } else {
+    void updateRunInPortal(run);
+  }
   return true;
 }
 
@@ -2432,6 +2445,7 @@ async function retryOrFailRun(run, step, { fatal = false } = {}) {
 async function finishRun(run, status) {
   const hadActiveProxy = Boolean(run.activeProxy);
   clearRunTimer(run.id);
+  clearPortalRunSync(run.id);
   clearProxyRotationTimer(run.id);
   stopProxyUsage(run);
   run.executionToken = null;
@@ -2630,13 +2644,47 @@ function schedulePortalResumePersist(run, delayMs = 500) {
     clearTimeout(existingTimer);
   }
 
+  const resolvedDelayMs = isPortalServerRun(run)
+    ? Math.max(Number(delayMs) || SERVER_PORTAL_SYNC_INTERVAL_MS, SERVER_PORTAL_SYNC_INTERVAL_MS)
+    : Math.max(Number(delayMs) || 500, 0);
+
   portalResumeTimers.set(run.id, setTimeout(() => {
     portalResumeTimers.delete(run.id);
     const liveRun = runtime.runs[run.id];
     if (liveRun === run) {
       void updateRunResumeStateInPortal(run);
     }
-  }, delayMs));
+  }, resolvedDelayMs));
+}
+
+function schedulePortalRunSync(run, delayMs = SERVER_PORTAL_SYNC_INTERVAL_MS) {
+  if (!run?.id) {
+    return;
+  }
+
+  const existingTimer = portalRunSyncTimers.get(run.id);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+  }
+
+  const resolvedDelayMs = Math.max(Number(delayMs) || SERVER_PORTAL_SYNC_INTERVAL_MS, 1000);
+  portalRunSyncTimers.set(run.id, setTimeout(() => {
+    portalRunSyncTimers.delete(run.id);
+    const liveRun = runtime.runs[run.id];
+    if (liveRun === run) {
+      void updateRunInPortal(run);
+    }
+  }, resolvedDelayMs));
+}
+
+function clearPortalRunSync(runId) {
+  const timer = portalRunSyncTimers.get(runId);
+  if (!timer) {
+    return;
+  }
+
+  clearTimeout(timer);
+  portalRunSyncTimers.delete(runId);
 }
 
 function scheduleRunCostPersist(run, delayMs = 10_000) {
