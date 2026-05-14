@@ -28,7 +28,8 @@ const {
   BLOCKED_PAGE_FAILURE_OPTIONS,
   createLegacyQueueEntries,
   isOpenUrlStep,
-  dropPairedExecutionStepAfterOpenUrlFailure
+  dropPairedExecutionStepAfterOpenUrlFailure,
+  scheduleRunScopedTimer
 } = require("../background/run-lifecycle-helpers.js");
 
 test("withControlPlaneProxyBypass appends portal and loopback hosts", () => {
@@ -457,6 +458,94 @@ test("dropPairedExecutionStepAfterOpenUrlFailure ignores empty and invalid queue
     method: "openUrl",
     url: "https://example.com/p/1"
   }), null);
+});
+
+test("scheduleRunScopedTimer schedules and clears its run-scoped timer when fired", () => {
+  const timers = new Map();
+  const scheduled = [];
+  const calls = [];
+  const run = { id: "run_1" };
+
+  const scheduledResult = scheduleRunScopedTimer(timers, run, (callbackRun) => {
+    calls.push(callbackRun.id);
+  }, {
+    delayMs: 1234,
+    setTimeoutFn(callback, delayMs) {
+      const timer = { callback, delayMs };
+      scheduled.push(timer);
+      return timer;
+    }
+  });
+
+  assert.equal(scheduledResult, true);
+  assert.equal(scheduled.length, 1);
+  assert.equal(scheduled[0].delayMs, 1234);
+  assert.equal(timers.get("run_1"), scheduled[0]);
+
+  scheduled[0].callback();
+
+  assert.equal(timers.has("run_1"), false);
+  assert.deepEqual(calls, ["run_1"]);
+});
+
+test("scheduleRunScopedTimer can throttle by keeping an existing timer", () => {
+  const timers = new Map();
+  const scheduled = [];
+  const cleared = [];
+  const run = { id: "run_1" };
+  const setTimeoutFn = (callback, delayMs) => {
+    const timer = { callback, delayMs };
+    scheduled.push(timer);
+    return timer;
+  };
+
+  assert.equal(scheduleRunScopedTimer(timers, run, () => {}, {
+    delayMs: 1000,
+    setTimeoutFn
+  }), true);
+  assert.equal(scheduleRunScopedTimer(timers, run, () => {}, {
+    delayMs: 2000,
+    replaceExisting: false,
+    setTimeoutFn,
+    clearTimeoutFn(timer) {
+      cleared.push(timer);
+    }
+  }), false);
+
+  assert.equal(scheduled.length, 1);
+  assert.equal(timers.get("run_1"), scheduled[0]);
+  assert.deepEqual(cleared, []);
+});
+
+test("scheduleRunScopedTimer can debounce by replacing an existing timer", () => {
+  const timers = new Map();
+  const scheduled = [];
+  const cleared = [];
+  const run = { id: "run_1" };
+  const setTimeoutFn = (callback, delayMs) => {
+    const timer = { callback, delayMs };
+    scheduled.push(timer);
+    return timer;
+  };
+  const clearTimeoutFn = (timer) => {
+    cleared.push(timer);
+  };
+
+  assert.equal(scheduleRunScopedTimer(timers, run, () => {}, {
+    delayMs: 1000,
+    setTimeoutFn,
+    clearTimeoutFn
+  }), true);
+  assert.equal(scheduleRunScopedTimer(timers, run, () => {}, {
+    delayMs: 2000,
+    setTimeoutFn,
+    clearTimeoutFn
+  }), true);
+
+  assert.equal(scheduled.length, 2);
+  assert.deepEqual(cleared, [scheduled[0]]);
+  assert.equal(timers.get("run_1"), scheduled[1]);
+  assert.equal(scheduled[1].delayMs, 2000);
 });
 
 test("createLegacyQueueEntries keeps empty-url and gofast steps execute-only", () => {

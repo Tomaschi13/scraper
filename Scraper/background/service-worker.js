@@ -54,7 +54,8 @@ const {
   BLOCKED_PAGE_FAILURE_OPTIONS,
   createLegacyQueueEntries,
   isOpenUrlStep,
-  dropPairedExecutionStepAfterOpenUrlFailure
+  dropPairedExecutionStepAfterOpenUrlFailure,
+  scheduleRunScopedTimer
 } = globalThis.ScraperRunLifecycleHelpers;
 
 const {
@@ -133,6 +134,7 @@ const OUTPUT_PREVIEW_ROW_LIMIT = 250;
 const PERSISTED_OUTPUT_PREVIEW_ROW_LIMIT = 50;
 const PERSISTED_QUEUE_PREVIEW_LIMIT = 100;
 const PERSISTED_VISITED_URL_PREVIEW_LIMIT = 250;
+const SERVER_PORTAL_INITIAL_SYNC_DELAY_MS = 5 * 1000;
 const SERVER_PORTAL_SYNC_INTERVAL_MS = 60 * 1000;
 const AUTO_PROXY_ROTATE_INTERVAL_MS = 10 * 60 * 1000;
 
@@ -1491,6 +1493,7 @@ async function emitRowsFromRuntime(tabId, tableName, rows) {
 
   run.emits += 1;
   run.rows += nextRows.length;
+  const firstServerEmit = isPortalServerRun(run) && run.emits === 1;
 
   appendLog(run, `Emit ${sanitizedName}: ${nextRows.length} row(s)`, "INFO");
   updateSnapshot(run);
@@ -1506,7 +1509,10 @@ async function emitRowsFromRuntime(tabId, tableName, rows) {
     broadcastState();
   }
   if (isPortalServerRun(run)) {
-    schedulePortalRunSync(run);
+    schedulePortalRunSync(
+      run,
+      firstServerEmit ? SERVER_PORTAL_INITIAL_SYNC_DELAY_MS : SERVER_PORTAL_SYNC_INTERVAL_MS
+    );
   } else {
     void updateRunInPortal(run);
   }
@@ -2639,22 +2645,30 @@ function schedulePortalResumePersist(run, delayMs = 500) {
     return;
   }
 
-  const existingTimer = portalResumeTimers.get(run.id);
-  if (existingTimer) {
-    clearTimeout(existingTimer);
-  }
-
-  const resolvedDelayMs = isPortalServerRun(run)
+  const serverRun = isPortalServerRun(run);
+  const resolvedDelayMs = serverRun
     ? Math.max(Number(delayMs) || SERVER_PORTAL_SYNC_INTERVAL_MS, SERVER_PORTAL_SYNC_INTERVAL_MS)
     : Math.max(Number(delayMs) || 500, 0);
 
-  portalResumeTimers.set(run.id, setTimeout(() => {
-    portalResumeTimers.delete(run.id);
+  scheduleRunScopedTimer(portalResumeTimers, run, () => {
     const liveRun = runtime.runs[run.id];
     if (liveRun === run) {
-      void updateRunResumeStateInPortal(run);
+      const syncPromise = updateRunResumeStateInPortal(run);
+      if (serverRun) {
+        void Promise.resolve(syncPromise).finally(() => {
+          const latestRun = runtime.runs[run.id];
+          if (latestRun === run && isRunningRun(run)) {
+            schedulePortalResumePersist(run);
+          }
+        });
+      } else {
+        void syncPromise;
+      }
     }
-  }, resolvedDelayMs));
+  }, {
+    delayMs: resolvedDelayMs,
+    replaceExisting: !serverRun
+  });
 }
 
 function schedulePortalRunSync(run, delayMs = SERVER_PORTAL_SYNC_INTERVAL_MS) {
@@ -2662,19 +2676,16 @@ function schedulePortalRunSync(run, delayMs = SERVER_PORTAL_SYNC_INTERVAL_MS) {
     return;
   }
 
-  const existingTimer = portalRunSyncTimers.get(run.id);
-  if (existingTimer) {
-    clearTimeout(existingTimer);
-  }
-
   const resolvedDelayMs = Math.max(Number(delayMs) || SERVER_PORTAL_SYNC_INTERVAL_MS, 1000);
-  portalRunSyncTimers.set(run.id, setTimeout(() => {
-    portalRunSyncTimers.delete(run.id);
+  scheduleRunScopedTimer(portalRunSyncTimers, run, () => {
     const liveRun = runtime.runs[run.id];
     if (liveRun === run) {
       void updateRunInPortal(run);
     }
-  }, resolvedDelayMs));
+  }, {
+    delayMs: resolvedDelayMs,
+    replaceExisting: false
+  });
 }
 
 function clearPortalRunSync(runId) {

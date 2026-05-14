@@ -481,6 +481,43 @@ const runLifecycleHelpers = (() => {
     return queue.pop() || null;
   }
 
+  function scheduleRunScopedTimer(timers, run, callback, options = {}) {
+    if (
+      !timers
+      || typeof timers.get !== "function"
+      || typeof timers.set !== "function"
+      || !run?.id
+      || typeof callback !== "function"
+    ) {
+      return false;
+    }
+
+    const existingTimer = timers.get(run.id);
+    const clearTimeoutFn = typeof options.clearTimeoutFn === "function"
+      ? options.clearTimeoutFn
+      : clearTimeout;
+
+    if (existingTimer) {
+      if (options.replaceExisting === false) {
+        return false;
+      }
+      clearTimeoutFn(existingTimer);
+    }
+
+    const delayMs = Math.max(Number(options.delayMs) || 0, 0);
+    const setTimeoutFn = typeof options.setTimeoutFn === "function"
+      ? options.setTimeoutFn
+      : setTimeout;
+
+    const timer = setTimeoutFn(() => {
+      timers.delete(run.id);
+      callback(run);
+    }, delayMs);
+
+    timers.set(run.id, timer);
+    return true;
+  }
+
   return {
     isRunningRun,
     getPendingProxyOperationCount,
@@ -506,7 +543,8 @@ const runLifecycleHelpers = (() => {
     BLOCKED_PAGE_FAILURE_OPTIONS,
     createLegacyQueueEntries,
     isOpenUrlStep,
-    dropPairedExecutionStepAfterOpenUrlFailure
+    dropPairedExecutionStepAfterOpenUrlFailure,
+    scheduleRunScopedTimer
   };
 })();
 
